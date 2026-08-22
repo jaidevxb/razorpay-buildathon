@@ -16,6 +16,7 @@ Run:  python -m app.simulator --count 100
 import argparse
 import random
 import sys
+import time
 
 import razorpay
 
@@ -66,6 +67,35 @@ def _make_customer(rng: random.Random):
     return f"{first} {last}", email, phone
 
 
+REQUEST_GAP_SECONDS = 0.25   # stay well under test-mode rate limits
+MAX_RETRIES = 5
+
+
+def _create_order_with_backoff(client, amount: int, receipt: str) -> str:
+    """Create a Razorpay order, backing off exponentially on rate limits.
+
+    Test mode rate-limits aggressive loops ("Too many requests"). We retry up
+    to MAX_RETRIES with 2^n second waits before giving up.
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            order = client.order.create({
+                "amount": amount,
+                "currency": "INR",
+                "receipt": receipt,
+                "notes": {"source": "reclaim-simulator"},
+            })
+            return order["id"]
+        except razorpay.errors.BadRequestError as e:
+            if "too many" not in str(e).lower() or attempt == MAX_RETRIES - 1:
+                raise
+            wait = 2 ** attempt
+            print(f"  rate limited, waiting {wait}s "
+                  f"(attempt {attempt + 1}/{MAX_RETRIES})...")
+            time.sleep(wait)
+    raise RuntimeError("unreachable")
+
+
 def seed(count: int, seed_value: int | None, offline: bool) -> None:
     init_db()
     rng = random.Random(seed_value)
@@ -80,7 +110,8 @@ def seed(count: int, seed_value: int | None, offline: bool) -> None:
                                        config.RAZORPAY_KEY_SECRET))
 
     created = 0
-    with get_conn() as conn:
+    conn = get_conn()
+    try:
         for i in range(1, count + 1):
             payment_id = f"pay_sim_{i:04d}"
             exists = conn.execute(
@@ -95,29 +126,34 @@ def seed(count: int, seed_value: int | None, offline: bool) -> None:
 
             rzp_order_id = None
             if client is not None:
-                order = client.order.create({
-                    "amount": amount,
-                    "currency": "INR",
-                    "receipt": payment_id,
-                    "notes": {"source": "reclaim-simulator"},
-                })
-                rzp_order_id = order["id"]
+                rzp_order_id = _create_order_with_backoff(
+                    client, amount, payment_id)
+                time.sleep(REQUEST_GAP_SECONDS)
 
-            conn.execute(
-                "INSERT INTO payments (id, rzp_order_id, customer_name, "
-                "customer_email, customer_phone, amount_paise, status, "
-                "failure_code, failure_message, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (payment_id, rzp_order_id, name, email, phone, amount,
-                 status, code, msg, utcnow()),
-            )
-            log_action(conn, payment_id, "simulator", "payment_seeded", {
-                "rzp_order_id": rzp_order_id,
-                "status": status,
-                "failure_code": code,
-                "amount_paise": amount,
-            })
+            # Commit per payment, not per batch: once a real order exists on
+            # Razorpay's side, our local record of it must survive any later
+            # crash. A batch-wide transaction would roll back rows whose
+            # external side effect already happened.
+            with conn:
+                conn.execute(
+                    "INSERT INTO payments (id, rzp_order_id, customer_name, "
+                    "customer_email, customer_phone, amount_paise, status, "
+                    "failure_code, failure_message, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (payment_id, rzp_order_id, name, email, phone, amount,
+                     status, code, msg, utcnow()),
+                )
+                log_action(conn, payment_id, "simulator", "payment_seeded", {
+                    "rzp_order_id": rzp_order_id,
+                    "status": status,
+                    "failure_code": code,
+                    "amount_paise": amount,
+                })
             created += 1
+            if created % 10 == 0:
+                print(f"  seeded {created}...")
+    finally:
+        conn.close()
 
     _print_summary(created)
 
