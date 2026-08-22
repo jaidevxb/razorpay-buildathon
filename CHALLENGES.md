@@ -28,3 +28,31 @@ The database may end up with fewer rows than requested after a crash, but every
 row it has is truthful, and idempotent re-runs fill the gap without duplicates.
 This "local record must survive if the external side effect happened" rule
 becomes the core design principle for the recovery executor too.
+
+## 2026-08-22 — Payment-link API is rate-limited much harder than orders
+
+**What broke:** The executor crashed on `Too many requests` even with the
+backoff that had fixed the same problem for order creation. Each action was
+also making two API calls (an "does this link already exist" lookup plus the
+create), doubling pressure on the stricter limit.
+
+**Fix:** Backoff wraps every Razorpay call now, with waits capped at 60s. And
+the existence lookup only runs on the crash-reconciliation path — a freshly
+planned action cannot have a pre-existing link, so checking was pure waste.
+
+**Silver lining:** the crash left one action stuck in `executing`, and the next
+run's reconciliation logic resolved it correctly against Razorpay by reference
+id — the crash-recovery path got tested by a real crash before we ever staged
+a fake one.
+
+## 2026-08-22 — Test mode allows only 30 payment links, total
+
+**What broke:** Partway through the batch, Razorpay returned
+`ServerError: test mode limit of 30 reached for payment_link`. Not a rate
+limit — a hard quota on links in test mode.
+
+**Fix:** Cancel each link as soon as its attempt resolves. This turned out to
+be the correct design regardless of quota: when attempt 1's link stays live
+and attempt 2 issues a new link for the same debt, a customer who later opens
+the stale link can pay twice. The quota error forced us into behaviour a real
+money system needs anyway.
