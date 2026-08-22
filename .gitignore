@@ -1,0 +1,11 @@
+# Secrets — never commit keys
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local database
+*.db
+*.sqlite3
