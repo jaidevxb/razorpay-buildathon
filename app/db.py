@@ -32,6 +32,17 @@ CREATE TABLE IF NOT EXISTS payments (
     created_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS diagnoses (
+    payment_id        TEXT PRIMARY KEY,
+    root_cause        TEXT NOT NULL,   -- LLM's classification of what went wrong
+    transient         INTEGER NOT NULL,-- 1 if retrying could plausibly succeed
+    recommended_action TEXT NOT NULL,  -- retry | payment_link | update_card | escalate | none
+    customer_message  TEXT NOT NULL,   -- drafted outreach text (advisory only)
+    model             TEXT NOT NULL,
+    created_at        TEXT NOT NULL,
+    FOREIGN KEY (payment_id) REFERENCES payments(id)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     payment_id  TEXT NOT NULL,
