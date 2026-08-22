@@ -43,6 +43,22 @@ CREATE TABLE IF NOT EXISTS diagnoses (
     FOREIGN KEY (payment_id) REFERENCES payments(id)
 );
 
+CREATE TABLE IF NOT EXISTS recovery_actions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    payment_id      TEXT NOT NULL,
+    action          TEXT NOT NULL,    -- retry | payment_link | update_card
+    attempt         INTEGER NOT NULL DEFAULT 1,
+    state           TEXT NOT NULL DEFAULT 'planned',
+        -- planned | executing | succeeded | failed
+    idempotency_key TEXT NOT NULL UNIQUE,
+    rzp_link_id     TEXT,             -- real Razorpay payment-link id, if any
+    rzp_link_url    TEXT,
+    result          TEXT,             -- JSON outcome detail
+    created_at      TEXT NOT NULL,
+    executed_at     TEXT,
+    FOREIGN KEY (payment_id) REFERENCES payments(id)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     payment_id  TEXT NOT NULL,
