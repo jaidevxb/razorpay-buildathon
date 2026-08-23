@@ -434,7 +434,9 @@ def dashboard(cls: str = "", rec: str = "") -> str:
     <div class="resbar">
       <div class="head"><b>{rupees(at_risk)} of your payments failed —
         here's where that money stands</b>
-        <span class="refresh-note">updates every 5s</span></div>
+        <span class="refresh-note">{
+          "a finished batch — explore it freely"
+          if READONLY else "updates every 5s"}</span></div>
       <div class="stack">
         <div style="width:{pct(money_in):.1f}%;
           background:{SEG_RECOVERED}" title="money in"></div>
@@ -665,8 +667,11 @@ def dashboard(cls: str = "", rec: str = "") -> str:
         </div>
       </div>
     </div>"""
-    return shell(body, refresh='<meta http-equiv="refresh" content="5">',
-                 right_slot=esc_nav())
+    # Auto-refresh exists so the recovered figure climbs while the executor is
+    # running. On a finished read-only batch nothing can change, and reloading
+    # would only throw the reader back to the top of the page mid-scroll.
+    refresh = "" if READONLY else '<meta http-equiv="refresh" content="5">'
+    return shell(body, refresh=refresh, right_slot=esc_nav())
 
 
 @app.get("/escalations", response_class=HTMLResponse)
