@@ -30,6 +30,32 @@ Same batch, same seeds, reproducible — the agent vs. blind auto-retry ×3
 More money, fewer contacts, zero compliance violations. Reproduce it:
 `python -m app.baseline` (assumptions documented in the file).
 
+## The problem hiding inside the average
+
+A merchant seeing "90% success" cannot see which channel is bleeding. Reclaim
+splits it, and the picture changes:
+
+| Paid with | Payments | Paid first try | After the agent |
+|---|---:|---:|---:|
+| UPI | 45 | 60% | **96%** |
+| Cards | 35 | 43% | **86%** |
+| Net banking | 16 | 56% | **100%** |
+| Wallets | 4 | 100% | 100% |
+
+Cards fail nearly twice as often as UPI at checkout — and that is exactly
+where the agent recovers most. `python -m app.health` prints this, along with
+per-bank health.
+
+**Attempts are a budget, so the agent protects it.** Policy allows three
+attempts per payment, ever. Roughly 40% of Indian payment failures are
+downstream bank problems, so spending an attempt while the customer's bank is
+broken wastes a third of that budget on a request that was never going to
+succeed. When a bank is failing meaningfully worse than its peers right now,
+its payments are **held rather than attempted, and the attempt is not
+consumed**. The threshold is relative to the batch norm, not a fixed number —
+a fixed threshold flags every bank on a bad day and misses a broken one on a
+good day.
+
 ## How it works
 
 ```mermaid
@@ -67,7 +93,7 @@ decides and acts.** Money never moves on a model's say-so.
 - **A real seat for the human** — the escalation queue (`/escalations`) shows
   why the agent stopped on each case; a person's decision lands in the same
   audit trail as `actor: human`.
-- **Tested invariants** — `python -m pytest` runs 42 tests proving the
+- **Tested invariants** — `python -m pytest` runs 59 tests proving the
   dangerous properties: fraud is never retried regardless of LLM output, the
   amount cap holds, attempt 4 never happens, crashes reconcile without
   duplicates, a refusal always stops contact.
@@ -120,11 +146,22 @@ python -m app.executor --loop --force-due  # execute (kill it mid-run — safe)
 python -m app.promises --parse        # parse customer replies
 python -m app.promises --resolve --force
 python -m app.baseline                # compare vs blind-retry baseline
-python -m pytest                      # 42 tests, incl. adversarial suite
+python -m app.health                  # per-method rates + bank health
+python -m pytest                      # 59 tests, incl. adversarial suite
 uvicorn app.main:app --port 8100      # dashboard
 ```
 
 Full walkthrough with the kill-and-resume demonstration: [DEMO.md](DEMO.md).
+
+### Hosting the dashboard
+
+The dashboard can be deployed publicly **without any API keys**: the batch has
+already run, so `demo/reclaim-demo.db` (a scrubbed snapshot — no Razorpay ids,
+no contact details) is served read-only. `DEMO_READONLY=1` blocks every
+mutating route with a 403, so nothing on the internet can spend money or
+change state. [`render.yaml`](render.yaml) deploys it as-is on Render's free
+tier. Rebuild the snapshot after a fresh run with
+`python -m app.make_demo_db`.
 
 ## What broke along the way
 
@@ -145,10 +182,12 @@ app/
   promises.py    promise-to-pay: Gemini parsing + deterministic outcomes
   untrusted.py   screens attacker-controlled reply text before it reaches AI
   baseline.py    blind-retry baseline for the honest comparison
+  channels.py    payment method / bank assignment (independent RNG stream)
+  health.py      per-method success rates; bank health vs. the batch norm
   roi.py         what the agent itself costs per rupee recovered
   main.py        FastAPI dashboard + escalation queue + signed webhooks
   db.py          SQLite schema incl. append-only audit log
   reset.py       wipe local state for a fresh demo
-tests/           42 tests on the invariants that make this safe near money,
+tests/           59 tests on the invariants that make this safe near money,
                  including an adversarial prompt-injection suite
 ```
