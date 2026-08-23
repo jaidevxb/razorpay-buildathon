@@ -8,13 +8,18 @@ for colorblind separation (see CHALLENGES.md); identity is never carried by
 color alone — every colored element also has a text label.
 """
 
+import hashlib
+import hmac
 import json
+import os
 
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.baseline import compare
 from app.db import get_conn, init_db, log_action
+from app.db import utcnow as db_utcnow
+from app.roi import compute as roi_compute
 
 app = FastAPI(title="Reclaim")
 
@@ -348,6 +353,7 @@ def dashboard(cls: str = "", rec: str = "") -> str:
     at_risk = (recovered["amt"] + manual["amt"] + escalated["amt"]
                + pending["amt"] + written_off["amt"])
     money_in = recovered["amt"] + manual["amt"]
+    roi = roi_compute()
     pct = (lambda amt: 100 * amt / at_risk if at_risk else 0)
     rate = 100 * recovered["amt"] / at_risk if at_risk else 0
 
@@ -426,6 +432,10 @@ def dashboard(cls: str = "", rec: str = "") -> str:
           Needs you {rupees(escalated['amt'])}</span>
         <span><span class="swatch" style="background:#98a2b3"></span>
           Let go {rupees(written_off['amt'])}</span>
+        <span style="margin-left:auto;color:#8b95a1">
+          Agent running cost: ₹{roi['total_cost_paise'] / 100:,.2f}
+          — ₹{roi['cost_per_100_recovered_rupees']:.2f} per ₹100 recovered
+        </span>
       </div>
     </div>"""
 
@@ -638,6 +648,75 @@ def escalations() -> str:
      'Nothing needs you right now — the agent is handling the rest.</div>'}"""
     return PAGE_SHELL.format(body=body, refresh="", right_slot="",
                              seg_recovered=SEG_RECOVERED)
+
+
+@app.post("/webhooks/razorpay")
+async def razorpay_webhook(request: Request):
+    """Webhook-first ingestion: how a production deployment hears about
+    failures, instead of polling.
+
+    Signature verification is mandatory — an unauthenticated endpoint that
+    mutates payment state is an attack surface, not a feature. Razorpay signs
+    the raw body with HMAC-SHA256 using the webhook secret; we verify with a
+    constant-time compare before parsing anything.
+    """
+    body = await request.body()
+    secret = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    if not secret:
+        raise HTTPException(503, "webhook secret not configured")
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(401, "invalid signature")
+
+    event = json.loads(body)
+    kind = event.get("event", "")
+    conn = get_conn()
+    try:
+        if kind == "payment.failed":
+            p = event["payload"]["payment"]["entity"]
+            with conn:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO payments (id, rzp_order_id, "
+                    "customer_name, customer_email, customer_phone, "
+                    "amount_paise, status, failure_code, failure_message, "
+                    "recovery_status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'failed', ?, ?, 'detected', ?)",
+                    (p["id"], p.get("order_id"),
+                     p.get("notes", {}).get("name", "Customer"),
+                     p.get("email", ""), p.get("contact", ""),
+                     p["amount"], p.get("error_code", "UNKNOWN"),
+                     p.get("error_description", ""), db_utcnow()),
+                )
+                if cur.rowcount:
+                    log_action(conn, p["id"], "webhook", "payment_failed_received",
+                               {"source": "razorpay webhook",
+                                "error_code": p.get("error_code")})
+            return {"status": "ok", "ingested": bool(cur.rowcount)}
+
+        if kind == "payment_link.paid":
+            ref = (event["payload"]["payment_link"]["entity"]
+                   .get("reference_id", ""))
+            row = conn.execute(
+                "SELECT payment_id FROM recovery_actions "
+                "WHERE idempotency_key = ?", (ref,)).fetchone()
+            if row is not None:
+                with conn:
+                    conn.execute(
+                        "UPDATE payments SET recovery_status = 'recovered' "
+                        "WHERE id = ? AND recovery_status NOT IN "
+                        "('recovered', 'recovered_manual')",
+                        (row["payment_id"],),
+                    )
+                    log_action(conn, row["payment_id"], "webhook",
+                               "payment_link_paid",
+                               {"reference_id": ref})
+                return {"status": "ok", "payment": row["payment_id"]}
+            return {"status": "ok", "payment": None}
+
+        return {"status": "ignored", "event": kind}
+    finally:
+        conn.close()
 
 
 @app.post("/escalations/{payment_id}")
