@@ -10,10 +10,11 @@ color alone — every colored element also has a text label.
 
 import json
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.db import get_conn, init_db
+from app.baseline import compare
+from app.db import get_conn, init_db, log_action
 
 app = FastAPI(title="Reclaim")
 
@@ -158,6 +159,17 @@ PAGE_SHELL = """<!doctype html>
 {body}
 </body>
 </html>"""
+
+
+def esc_nav() -> str:
+    conn = get_conn()
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM payments "
+                         "WHERE recovery_status = 'escalated'").fetchone()[0]
+    finally:
+        conn.close()
+    return (f'<a href="/escalations" style="font-size:13px">'
+            f'Escalation queue ({n})</a>')
 
 
 def badge(text: str) -> str:
@@ -360,9 +372,47 @@ def dashboard(cls: str = "", rec: str = "") -> str:
             {rupees(f['amount_paise'])}</div>
         </div>""")
 
+    cmp_data = compare()
+    ca, cb = cmp_data["agent"], cmp_data["baseline"]
+    cmp_pct = (lambda p: f"{100 * p / at_risk:.0f}%" if at_risk else "—")
+    cmp_rows = [
+        ("Recovered (clean)",
+         f"<b style='color:#1e7f4f'>{rupees(ca['recovered_paise'])} "
+         f"({cmp_pct(ca['recovered_paise'])})</b>",
+         f"{rupees(cb['recovered_paise'])} "
+         f"({cmp_pct(cb['recovered_paise'])})"),
+        ("“Recovered” from suspected fraud — a chargeback time bomb",
+         rupees(0),
+         f"<b style='color:#b42318'>{rupees(cb['fraud_recovered_paise'])}</b>"),
+        ("Attempts made", str(ca["attempts"]), str(cb["attempts"])),
+        ("Retries against suspected fraud",
+         "0", f"<b style='color:#b42318'>{cb['fraud_retries']}</b>"),
+        ("Attempts on dead (expired) cards",
+         str(ca["dead_card_attempts"]), str(cb["dead_card_attempts"])),
+        ("Customer refusals honoured",
+         str(ca["refusals_honoured"]), str(cb["refusals_honoured"])),
+    ]
+    cmp_html = f"""
+    <div class="panel" style="margin-bottom:20px">
+      <div class="panel-head"><h2>Agent vs. blind auto-retry — same batch,
+        seeded &amp; reproducible</h2>
+        <span class="refresh-note">baseline: what most merchants do today
+        (retry everything ×3, no diagnosis, no timing, no listening)</span>
+      </div>
+      <table>
+        <thead><tr><th>Metric</th><th class="num">Reclaim agent</th>
+          <th class="num">Blind retry ×3</th></tr></thead>
+        <tbody>{''.join(
+            f'<tr><td>{m}</td><td class="num">{a}</td>'
+            f'<td class="num">{b}</td></tr>'
+            for m, a, b in cmp_rows)}</tbody>
+      </table>
+    </div>"""
+
     body = f"""
     {kpis}
     {resbar}
+    {cmp_html}
     <div class="cols">
       <div class="panel">
         <div class="panel-head"><h2>At-risk payments ({len(rows)})</h2>
@@ -397,9 +447,95 @@ def dashboard(cls: str = "", rec: str = "") -> str:
     return PAGE_SHELL.format(
         body=body,
         refresh='<meta http-equiv="refresh" content="5">',
-        right_slot="",
+        right_slot=esc_nav(),
         seg_recovered=SEG_RECOVERED,
     )
+
+
+@app.get("/escalations", response_class=HTMLResponse)
+def escalations() -> str:
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT p.*, d.root_cause, d.recommended_action, "
+            "  (SELECT a.detail FROM audit_log a WHERE a.payment_id = p.id "
+            "   AND (a.action LIKE '%escalat%' OR a.action = 'promise_broken')"
+            "   ORDER BY a.id DESC LIMIT 1) esc_detail "
+            "FROM payments p LEFT JOIN diagnoses d ON d.payment_id = p.id "
+            "WHERE p.recovery_status = 'escalated' "
+            "ORDER BY p.amount_paise DESC").fetchall()
+    finally:
+        conn.close()
+
+    cards = []
+    for r in rows:
+        reason = "—"
+        if r["esc_detail"]:
+            detail = json.loads(r["esc_detail"])
+            reason = (detail.get("reason") or detail.get("policy")
+                      or detail.get("note") or "—")
+        cards.append(f"""
+        <div class="panel" style="margin-bottom:12px;padding:14px 16px">
+          <div style="display:flex;justify-content:space-between;
+                      align-items:baseline;gap:12px;flex-wrap:wrap">
+            <div>
+              <a href="/payment/{r['id']}"><b>{r['id']}</b></a>
+              · {r['customer_name']} · {rupees(r['amount_paise'])}
+              · {r['failure_code']}
+            </div>
+            <form method="post" action="/escalations/{r['id']}"
+                  style="display:flex;gap:8px">
+              <button name="decision" value="recovered"
+                style="font:inherit;font-size:12px;padding:4px 12px;
+                       border-radius:5px;border:1px solid #1e7f4f;
+                       background:#e7f4ec;color:#1e7f4f;cursor:pointer">
+                Collected manually</button>
+              <button name="decision" value="written_off"
+                style="font:inherit;font-size:12px;padding:4px 12px;
+                       border-radius:5px;border:1px solid #d4d9df;
+                       background:#fff;color:#3d4854;cursor:pointer">
+                Write off</button>
+            </form>
+          </div>
+          <div style="color:#5b6774;font-size:13px;margin-top:6px">
+            Why the agent stopped: {reason}</div>
+        </div>""")
+
+    body = f"""
+    <a href="/">&larr; Dashboard</a>
+    <h1 class="detail-head" style="font-size:20px">Escalation queue</h1>
+    <div class="detail-sub">Payments the agent deliberately handed to a
+      human. Decisions made here are recorded in the audit trail as
+      <b>actor: human</b>.</div>
+    {''.join(cards) or '<div class="panel" style="padding:14px 16px">'
+     'Queue is empty — nothing needs a human right now.</div>'}"""
+    return PAGE_SHELL.format(body=body, refresh="", right_slot="",
+                             seg_recovered=SEG_RECOVERED)
+
+
+@app.post("/escalations/{payment_id}")
+def resolve_escalation(payment_id: str, decision: str = Form(...)):
+    if decision not in ("recovered", "written_off"):
+        return RedirectResponse("/escalations", status_code=303)
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT recovery_status FROM payments WHERE id = ?",
+            (payment_id,)).fetchone()
+        # only queue members can be resolved, and only once
+        if row is not None and row["recovery_status"] == "escalated":
+            with conn:
+                conn.execute(
+                    "UPDATE payments SET recovery_status = ? WHERE id = ?",
+                    (decision, payment_id),
+                )
+                log_action(conn, payment_id, "human", "escalation_resolved", {
+                    "decision": decision,
+                    "note": "resolved by a person from the escalation queue",
+                })
+    finally:
+        conn.close()
+    return RedirectResponse("/escalations", status_code=303)
 
 
 @app.get("/payment/{payment_id}", response_class=HTMLResponse)
@@ -477,5 +613,5 @@ def payment_detail(payment_id: str) -> str:
     {actions_html}
     <h3 class="sec">Audit trail — every action with its reasoning</h3>
     <ul class="timeline">{''.join(items)}</ul>"""
-    return PAGE_SHELL.format(body=body, refresh="", right_slot="",
+    return PAGE_SHELL.format(body=body, refresh="", right_slot=esc_nav(),
                              seg_recovered=SEG_RECOVERED)

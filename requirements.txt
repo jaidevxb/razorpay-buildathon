@@ -4,3 +4,5 @@ razorpay
 google-genai
 python-dotenv
 httpx
+python-multipart
+pytest
