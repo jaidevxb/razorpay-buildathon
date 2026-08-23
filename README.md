@@ -82,6 +82,50 @@ decides and acts.** Money never moves on a model's say-so.
 | Parse customer replies ("salary Friday ko aayegi...") | **Gemini** | Hinglish free text → structured intent + timeframe |
 | Decide what a promise means | No — policy rules | ≤7-day promises tracked; refusals stop contact immediately; "already paid" claims go to a human — the agent never argues with a customer |
 
+## How a merchant connects it
+
+**If Razorpay ships this**, integration is a toggle. Razorpay already holds
+every payment, every issuer decline code, and every customer's contact
+details — the merchant just sets their own numbers (approval cap, max
+attempts, auto-write-off floor, quiet hours, which channels to act on) and
+recovered money lands in their normal settlement. No code, no keys, no
+webhook.
+
+**Self-hosted, one merchant** — what this repo does today, about ten minutes:
+
+1. Razorpay Dashboard → Settings → API Keys → generate keys → put them in
+   `.env` (test mode needs no KYC).
+2. Settings → Webhooks → add `https://your-host/webhooks/razorpay`, subscribe
+   to `payment.failed` and `payment_link.paid`, set a signing secret. Every
+   request is signature-verified; unsigned ones are refused.
+3. Run the agent. Failures arrive within seconds instead of being polled for.
+
+**As a third-party product serving many merchants**, the right mechanism is
+Razorpay's partner / linked-account model — the merchant authorises the
+connection on Razorpay's own domain and pastes no keys anywhere, and can
+revoke it from their side. Asking merchants to hand live keys to someone
+else's website is not an acceptable design for software that moves money.
+
+### On running many merchants at once
+
+What is built here is **single-tenant**: one database, one set of credentials,
+one merchant's batch. The design does not have to be thrown away to change
+that, and the split is clean:
+
+*Already right for it* — every action is idempotent and crash-safe (the hard
+part of distributing work), idempotency keys are already per payment/action/
+attempt, policy is separate from execution, the audit log is append-only, and
+webhook ingestion is signature-verified and idempotent against redelivery.
+
+*What must change* — a merchant id on every table with every query scoped to
+it (the one change that has to be exhaustive), per-merchant encrypted
+credentials instead of `.env`, Postgres instead of SQLite for concurrent
+writers, a job queue so one merchant's batch can't delay another's, per-tenant
+API rate budgets, and webhook routing by account id.
+
+Put plainly: the concurrency and correctness work is done; the multi-tenancy
+work is scoping.
+
 ## Safety properties
 
 - **Stopping rules** — 3 attempts max, then a human. One promise per payment.
