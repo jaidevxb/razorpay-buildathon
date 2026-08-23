@@ -67,7 +67,7 @@ decides and acts.** Money never moves on a model's say-so.
 - **A real seat for the human** — the escalation queue (`/escalations`) shows
   why the agent stopped on each case; a person's decision lands in the same
   audit trail as `actor: human`.
-- **Tested invariants** — `python -m pytest` runs 23 tests proving the
+- **Tested invariants** — `python -m pytest` runs 42 tests proving the
   dangerous properties: fraud is never retried regardless of LLM output, the
   amount cap holds, attempt 4 never happens, crashes reconcile without
   duplicates, a refusal always stops contact.
@@ -79,6 +79,13 @@ decides and acts.** Money never moves on a model's say-so.
 - **Total accountability** — an append-only audit log records every action by
   every component *with its reasoning*. The dashboard renders it per payment.
 - **Privacy** — only the customer's first name is ever sent to the LLM.
+- **Hardened against prompt injection** — a customer reply is
+  attacker-controlled text. It is regex-screened for injection shape *before*
+  any model call, fenced as untrusted data inside the prompt, and — because
+  neither defence can be assumed perfect — autonomy is scaled to consequence:
+  a promise merely pauses collection and stays automatic, while a refusal
+  forfeits money and needs a human above ₹500. Found by attacking our own
+  agent and succeeding; see [CHALLENGES.md](CHALLENGES.md) entry 7.
 - **It knows what it costs** — the agent's own bill (LLM calls + outreach)
   is tracked: ₹11.60 total for this batch, about ₹0.01 per ₹100 recovered
   (`python -m app.roi`, assumptions in the file).
@@ -113,7 +120,7 @@ python -m app.executor --loop --force-due  # execute (kill it mid-run — safe)
 python -m app.promises --parse        # parse customer replies
 python -m app.promises --resolve --force
 python -m app.baseline                # compare vs blind-retry baseline
-python -m pytest                      # 23 tests on the money path
+python -m pytest                      # 42 tests, incl. adversarial suite
 uvicorn app.main:app --port 8100      # dashboard
 ```
 
@@ -136,10 +143,12 @@ app/
   policy.py      deterministic decision rules, hard caps, retry timing
   executor.py    idempotent execution, crash reconciliation, quota fallback
   promises.py    promise-to-pay: Gemini parsing + deterministic outcomes
+  untrusted.py   screens attacker-controlled reply text before it reaches AI
   baseline.py    blind-retry baseline for the honest comparison
   roi.py         what the agent itself costs per rupee recovered
   main.py        FastAPI dashboard + escalation queue + signed webhooks
   db.py          SQLite schema incl. append-only audit log
   reset.py       wipe local state for a fresh demo
-tests/           23 tests on the invariants that make this safe near money
+tests/           42 tests on the invariants that make this safe near money,
+                 including an adversarial prompt-injection suite
 ```

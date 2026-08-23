@@ -1,6 +1,6 @@
 # Demo runbook
 
-The full pipeline, start to finish, with the two showpiece moments marked.
+The full pipeline, start to finish, with the three showpiece moments marked.
 Every command runs from the project root with the venv active
 (`.\.venv\Scripts\activate`, or prefix commands with `.\.venv\Scripts\`).
 
@@ -74,16 +74,35 @@ python -m app.promises --resolve --force    # --force: demo pacing, treat due no
 ```
 
 Gemini parses the Hinglish; deterministic policy decides: short promises are
-tracked, refusals stop contact immediately (written off), "already paid"
-claims and unclear replies go to a human.
+tracked, small refusals stop contact immediately (written off), larger
+refusals pause for a human to confirm before money is given up, and "already
+paid" or unclear replies go to a human.
 
-## 6. The human's seat — escalation queue
+## 6. SHOWPIECE 3: attack your own agent
+
+A customer reply is attacker-controlled text. Send the agent a hostile one:
+
+```
+python -m app.redteam --list        # six real payloads
+python -m app.redteam --attack 1    # instruction override -> forgive the debt
+python -m app.promises --parse
+```
+
+Output: `QUARANTINED — tries to override earlier instructions`. The reply is
+screened before any model call, the payment is held for human review, and no
+money moves. On the dashboard it appears in Customer promises as **blocked**
+with the reason.
+
+Say the line: *"This payload used to work. It made the agent write off the
+debt. I found it by attacking my own system."*
+
+## 7. The human's seat — escalation queue
 
 Open **/escalations**: every case the agent deliberately stopped on, with the
 reason. Click "Collected manually" or "Write off" — the decision lands in the
 audit trail as `actor: human`.
 
-## 7. The honest comparison
+## 8. The honest comparison
 
 ```
 python -m app.baseline
@@ -94,7 +113,7 @@ the recovery, 60% more attempts, retries against suspected fraud, 18 attempts
 on dead cards, and it can't hear a customer say no. Also rendered as the
 comparison table on the dashboard.
 
-## 8. What the agent itself costs
+## 9. What the agent itself costs
 
 ```
 python -m app.roi
@@ -104,18 +123,18 @@ LLM calls + outreach, priced from published rates: about ₹11.60 to recover
 ₹96,433 — roughly ₹0.01 per ₹100 recovered. Also shown on the dashboard next
 to the resolution bar.
 
-## 9. Proof, not vibes
+## 10. Proof, not vibes
 
 ```
 python -m pytest
 ```
 
-23 tests on the money-path invariants: fraud never retried regardless of LLM
+42 tests on the money-path invariants: fraud never retried regardless of LLM
 output, amount cap enforced, attempt 4 impossible, crash reconciliation never
 duplicates, refusals always stop contact, and webhooks reject bad signatures
 without writing anything.
 
-## 10. Read the result
+## 11. Read the result
 
 Dashboard shows the final split: recovered / escalated / written off, the
 recovery rate per failure class, and every payment's full audit trail.
