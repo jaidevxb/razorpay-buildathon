@@ -20,10 +20,43 @@ app = FastAPI(title="Reclaim")
 
 init_db()
 
+# Merchant-facing language. Technical identifiers stay visible in tooltips
+# and on the audit/detail pages; the main screen answers a merchant's real
+# questions: how much did I lose, what did you get back, what needs me?
+FAILURE_LABEL = {
+    "INSUFFICIENT_FUNDS": "Not enough balance",
+    "EXPIRED_CARD": "Card expired",
+    "GATEWAY_ERROR": "Bank was down",
+    "UPI_TIMEOUT": "UPI request expired",
+    "CHECKOUT_ABANDONED": "Left at checkout",
+    "FRAUD_SUSPECTED": "Suspicious — blocked",
+}
+STATE_LABEL = {
+    "captured": "paid",
+    "failed": "failed",
+    "abandoned": "left checkout",
+    "detected": "found",
+    "in_progress": "working on it",
+    "promised": "promised to pay",
+    "recovered": "money in",
+    "recovered_manual": "collected by you",
+    "escalated": "needs you",
+    "written_off": "let go",
+    "planned": "queued",
+    "executing": "in flight",
+    "succeeded": "worked",
+}
+ACTION_LABEL = {
+    "retry": "retried the payment",
+    "payment_link": "sent a payment link",
+    "update_card": "asked for a new card",
+}
+
 # status -> (background tint, text color)
 BADGE = {
     "captured": ("#e7f4ec", "#1e7f4f"),
     "recovered": ("#e7f4ec", "#1e7f4f"),
+    "recovered_manual": ("#e0f2f1", "#00695c"),
     "failed": ("#fdecea", "#b42318"),
     "abandoned": ("#fdf3e0", "#9a6700"),
     "detected": ("#fdf3e0", "#9a6700"),
@@ -69,7 +102,23 @@ PAGE_SHELL = """<!doctype html>
            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
            gap: 12px; margin-bottom: 14px; }}
   .kpi {{ background: #fff; border: 1px solid #e3e6ea; border-radius: 8px;
-          padding: 14px 16px; }}
+          padding: 14px 16px; transition: transform .18s ease,
+          box-shadow .18s ease; }}
+  .kpi:hover {{ transform: translateY(-2px);
+                box-shadow: 0 6px 18px rgba(23,32,43,.08); }}
+  .kpi.hero {{ background: #f2faf5; border-color: #cbe7d6; }}
+  .kpi .icon {{ float: right; color: #8b95a1; margin-top: 2px; }}
+  .kpi.hero .icon {{ color: #2f9e68; }}
+  @keyframes pop {{ 0% {{ transform: scale(1); }}
+    35% {{ transform: scale(1.07); color: #1e7f4f; }}
+    100% {{ transform: scale(1); }} }}
+  .value.flash {{ animation: pop .8s ease; }}
+  .pulse {{ display: inline-flex; align-items: center; gap: 6px;
+            font-size: 12px; color: #5b6774; }}
+  .pulse i {{ width: 8px; height: 8px; border-radius: 50%;
+              background: #2f9e68; animation: beat 2s ease infinite; }}
+  @keyframes beat {{ 0%, 100% {{ box-shadow: 0 0 0 0 rgba(47,158,104,.4); }}
+    50% {{ box-shadow: 0 0 0 5px rgba(47,158,104,0); }} }}
   .kpi .label {{ color: #5b6774; font-size: 11px; font-weight: 600;
                  text-transform: uppercase; letter-spacing: .05em; }}
   .kpi .value {{ font-size: 24px; font-weight: 650; margin-top: 2px;
@@ -150,13 +199,35 @@ PAGE_SHELL = """<!doctype html>
 </head>
 <body>
 <header>
-  <div class="brand">Reclaim<small>Revenue recovery agent</small></div>
-  <div style="display:flex;align-items:center;gap:12px">
+  <div class="brand">Reclaim<small>Wins back your failed payments</small></div>
+  <div style="display:flex;align-items:center;gap:14px">
+    <span class="pulse"><i></i>agent watching payments</span>
     {right_slot}
     <span class="env">RAZORPAY TEST MODE</span>
   </div>
 </header>
 {body}
+<script>
+// Count-up on change only: numbers animate when money actually moves,
+// stay still otherwise (page reloads every 5s).
+document.querySelectorAll('[data-count]').forEach(function (el) {{
+  var target = parseFloat(el.getAttribute('data-count'));
+  var key = 'reclaim:' + el.getAttribute('data-key');
+  var prev = parseFloat(sessionStorage.getItem(key));
+  try {{ sessionStorage.setItem(key, String(target)); }} catch (e) {{}}
+  if (isNaN(prev) || prev === target) return;
+  el.classList.add('flash');
+  var t0 = performance.now(), dur = 700;
+  function step(t) {{
+    var p = Math.min(1, (t - t0) / dur);
+    var eased = 1 - Math.pow(1 - p, 3);
+    var val = prev + (target - prev) * eased;
+    el.textContent = '₹' + Math.round(val).toLocaleString('en-IN');
+    if (p < 1) requestAnimationFrame(step);
+  }}
+  requestAnimationFrame(step);
+}});
+</script>
 </body>
 </html>"""
 
@@ -169,18 +240,35 @@ def esc_nav() -> str:
     finally:
         conn.close()
     return (f'<a href="/escalations" style="font-size:13px">'
-            f'Escalation queue ({n})</a>')
+            f'Needs you ({n})</a>')
 
 
 def badge(text: str) -> str:
     bg, fg = BADGE.get(text, ("#eef0f2", "#5b6774"))
-    label = text.replace("_", " ")
-    return (f'<span class="badge" style="background:{bg};'
+    label = STATE_LABEL.get(text, text.replace("_", " "))
+    return (f'<span class="badge" title="{text}" style="background:{bg};'
             f'color:{fg}">{label}</span>')
 
 
 def rupees(paise: int) -> str:
     return f"₹{paise / 100:,.0f}"
+
+
+def ago(iso: str) -> str:
+    """Human time: '2m ago' beats an ISO timestamp for a merchant."""
+    from datetime import datetime, timezone
+    try:
+        then = datetime.fromisoformat(iso)
+        secs = (datetime.now(timezone.utc) - then).total_seconds()
+    except (ValueError, TypeError):
+        return ""
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -196,6 +284,10 @@ def dashboard(cls: str = "", rec: str = "") -> str:
         recovered = conn.execute(
             "SELECT COUNT(*) n, COALESCE(SUM(amount_paise),0) amt "
             "FROM payments WHERE recovery_status = 'recovered'").fetchone()
+        manual = conn.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(amount_paise),0) amt "
+            "FROM payments WHERE recovery_status = 'recovered_manual'"
+        ).fetchone()
         escalated = conn.execute(
             "SELECT COUNT(*) n, COALESCE(SUM(amount_paise),0) amt "
             "FROM payments WHERE recovery_status = 'escalated'").fetchone()
@@ -253,39 +345,69 @@ def dashboard(cls: str = "", rec: str = "") -> str:
     finally:
         conn.close()
 
-    at_risk = (recovered["amt"] + escalated["amt"] + pending["amt"]
-               + written_off["amt"])
+    at_risk = (recovered["amt"] + manual["amt"] + escalated["amt"]
+               + pending["amt"] + written_off["amt"])
+    money_in = recovered["amt"] + manual["amt"]
     pct = (lambda amt: 100 * amt / at_risk if at_risk else 0)
     rate = 100 * recovered["amt"] / at_risk if at_risk else 0
 
+    ic = ('<svg class="icon" width="16" height="16" viewBox="0 0 24 24" '
+          'fill="none" stroke="currentColor" stroke-width="2" '
+          'stroke-linecap="round" stroke-linejoin="round">{}</svg>')
+    icons = {
+        "billed": ic.format('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 '
+                            '2h12a2 2 0 0 0 2-2V8z"/>'
+                            '<polyline points="14 2 14 8 20 8"/>'),
+        "paid": ic.format('<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>'
+                          '<polyline points="22 4 12 14.01 9 11.01"/>'),
+        "won": ic.format('<polyline points="1 4 1 10 7 10"/>'
+                         '<path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>'),
+        "working": ic.format('<circle cx="12" cy="12" r="10"/>'
+                             '<polyline points="12 6 12 12 16 14"/>'),
+        "you": ic.format('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 '
+                         '4v2"/><circle cx="12" cy="7" r="4"/>'),
+    }
     kpis = f"""
     <div class="kpis">
-      <div class="kpi"><div class="label">Batch volume</div>
-        <div class="value">{rupees(total['amt'])}</div>
+      <div class="kpi">{icons['billed']}<div class="label">You billed</div>
+        <div class="value" data-count="{total['amt'] // 100}"
+          data-key="billed">{rupees(total['amt'])}</div>
         <div class="note">{total['n']} payments</div></div>
-      <div class="kpi"><div class="label">Captured cleanly</div>
-        <div class="value">{rupees(captured['amt'])}</div>
+      <div class="kpi">{icons['paid']}
+        <div class="label">Paid on first try</div>
+        <div class="value" data-count="{captured['amt'] // 100}"
+          data-key="paid">{rupees(captured['amt'])}</div>
         <div class="note">{captured['n']} payments</div></div>
-      <div class="kpi"><div class="label">Recovered by agent</div>
-        <div class="value">{rupees(recovered['amt'])}</div>
-        <div class="note">{recovered['n']} payments · {rate:.0f}% of at-risk
-        value</div></div>
-      <div class="kpi"><div class="label">In pipeline</div>
-        <div class="value">{rupees(pending['amt'])}</div>
+      <div class="kpi hero">{icons['won']}
+        <div class="label">Won back by the agent</div>
+        <div class="value" style="color:#1e7f4f"
+          data-count="{recovered['amt'] // 100}" data-key="won">
+          {rupees(recovered['amt'])}</div>
+        <div class="note">{recovered['n']} payments ·
+          {rate:.0f}% of what failed{
+          f" · +{rupees(manual['amt'])} collected by you"
+          if manual['n'] else ""}</div></div>
+      <div class="kpi">{icons['working']}
+        <div class="label">Being worked on</div>
+        <div class="value" data-count="{pending['amt'] // 100}"
+          data-key="pending">{rupees(pending['amt'])}</div>
         <div class="note">{pending['n']} payments</div></div>
-      <div class="kpi"><div class="label">Escalated to human</div>
-        <div class="value">{rupees(escalated['amt'])}</div>
-        <div class="note">{escalated['n']} payments</div></div>
+      <div class="kpi">{icons['you']}
+        <div class="label">Needs your attention</div>
+        <div class="value" data-count="{escalated['amt'] // 100}"
+          data-key="needsyou">{rupees(escalated['amt'])}</div>
+        <div class="note">{escalated['n']} payments ·
+          <a href="/escalations">review</a></div></div>
     </div>"""
 
     resbar = f"""
     <div class="resbar">
-      <div class="head"><b>Resolution of at-risk revenue
-        ({rupees(at_risk)})</b>
-        <span class="refresh-note">page refreshes every 5s</span></div>
+      <div class="head"><b>{rupees(at_risk)} of your payments failed —
+        here's where that money stands</b>
+        <span class="refresh-note">updates every 5s</span></div>
       <div class="stack">
-        <div style="width:{pct(recovered['amt']):.1f}%;
-          background:{SEG_RECOVERED}" title="recovered"></div>
+        <div style="width:{pct(money_in):.1f}%;
+          background:{SEG_RECOVERED}" title="money in"></div>
         <div style="width:{pct(pending['amt']):.1f}%;
           background:{SEG_PENDING}" title="pending"></div>
         <div style="width:{pct(escalated['amt']):.1f}%;
@@ -295,13 +417,15 @@ def dashboard(cls: str = "", rec: str = "") -> str:
       </div>
       <div class="legend">
         <span><span class="swatch" style="background:{SEG_RECOVERED}"></span>
-          Recovered {rupees(recovered['amt'])}</span>
+          Money in {rupees(money_in)}{
+          f" (agent {rupees(recovered['amt'])} + you {rupees(manual['amt'])})"
+          if manual['n'] else ""}</span>
         <span><span class="swatch" style="background:{SEG_PENDING}"></span>
-          Pending {rupees(pending['amt'])}</span>
+          Still trying {rupees(pending['amt'])}</span>
         <span><span class="swatch" style="background:{SEG_ESCALATED}"></span>
-          Escalated {rupees(escalated['amt'])}</span>
+          Needs you {rupees(escalated['amt'])}</span>
         <span><span class="swatch" style="background:#98a2b3"></span>
-          Written off {rupees(written_off['amt'])}</span>
+          Let go {rupees(written_off['amt'])}</span>
       </div>
     </div>"""
 
@@ -320,12 +444,13 @@ def dashboard(cls: str = "", rec: str = "") -> str:
 
     body_rows = []
     for r in rows:
+        fail = FAILURE_LABEL.get(r["failure_code"], r["failure_code"] or "")
         body_rows.append(f"""
         <tr>
           <td><a href="/payment/{r['id']}">{r['id']}</a></td>
           <td>{r['customer_name']}</td>
           <td class="num">{rupees(r['amount_paise'])}</td>
-          <td>{r['failure_code'] or ''}</td>
+          <td title="{r['failure_code'] or ''}">{fail}</td>
           <td class="cause">{r['root_cause'] or '—'}</td>
           <td class="num">{r['attempts'] or ''}</td>
           <td>{badge(r['recovery_status'])}</td>
@@ -336,7 +461,8 @@ def dashboard(cls: str = "", rec: str = "") -> str:
         frac = 100 * b["r"] / b["n"] if b["n"] else 0
         class_rows.append(f"""
         <div class="row">
-          <div class="lbl"><span>{b['failure_code']}</span>
+          <div class="lbl"><span title="{b['failure_code']}">
+            {FAILURE_LABEL.get(b['failure_code'], b['failure_code'])}</span>
             <span>{b['r']}/{b['n']}</span></div>
           <div class="track"><div class="fill"
             style="width:{frac:.0f}%"></div></div>
@@ -363,12 +489,13 @@ def dashboard(cls: str = "", rec: str = "") -> str:
     for f in feed:
         link = (f' · <a href="{f["rzp_link_url"]}" target="_blank">link</a>'
                 if f["rzp_link_url"] else "")
+        what = ACTION_LABEL.get(f["action"], f["action"].replace("_", " "))
         feed_items.append(f"""
         <div class="feed-item">
           <a href="/payment/{f['payment_id']}">{f['payment_id']}</a>
-          · {f['action'].replace('_', ' ')} · attempt {f['attempt']}
+          · {what} (try {f['attempt']})
           {badge(f['state'])}{link}
-          <div class="meta">{f['created_at'][:19].replace('T', ' ')} ·
+          <div class="meta">{ago(f['created_at'])} ·
             {rupees(f['amount_paise'])}</div>
         </div>""")
 
@@ -394,10 +521,10 @@ def dashboard(cls: str = "", rec: str = "") -> str:
     ]
     cmp_html = f"""
     <div class="panel" style="margin-bottom:20px">
-      <div class="panel-head"><h2>Agent vs. blind auto-retry — same batch,
-        seeded &amp; reproducible</h2>
-        <span class="refresh-note">baseline: what most merchants do today
-        (retry everything ×3, no diagnosis, no timing, no listening)</span>
+      <div class="panel-head"><h2>Reclaim vs. the old way — same payments,
+        measured</h2>
+        <span class="refresh-note">the old way: blindly retry everything ×3
+        — no diagnosis, no timing, no listening</span>
       </div>
       <table>
         <thead><tr><th>Metric</th><th class="num">Reclaim agent</th>
@@ -420,16 +547,16 @@ def dashboard(cls: str = "", rec: str = "") -> str:
         <div style="overflow-x:auto">
         <table>
           <thead><tr><th>Payment</th><th>Customer</th>
-            <th class="num">Amount</th><th>Failure</th>
-            <th>Root cause (Gemini)</th><th class="num">Attempts</th>
-            <th>State</th></tr></thead>
+            <th class="num">Amount</th><th>What happened</th>
+            <th>Why (AI diagnosis)</th><th class="num">Tries</th>
+            <th>Status</th></tr></thead>
           <tbody>{''.join(body_rows)}</tbody>
         </table>
         </div>
       </div>
       <div>
         <div class="panel">
-          <div class="panel-head"><h2>Recovery rate by failure class</h2></div>
+          <div class="panel-head"><h2>How much came back, by reason</h2></div>
           <div class="classbar">{''.join(class_rows)}</div>
         </div>
         <div class="panel">
@@ -481,7 +608,7 @@ def escalations() -> str:
             <div>
               <a href="/payment/{r['id']}"><b>{r['id']}</b></a>
               · {r['customer_name']} · {rupees(r['amount_paise'])}
-              · {r['failure_code']}
+              · {FAILURE_LABEL.get(r['failure_code'], r['failure_code'])}
             </div>
             <form method="post" action="/escalations/{r['id']}"
                   style="display:flex;gap:8px">
@@ -503,12 +630,12 @@ def escalations() -> str:
 
     body = f"""
     <a href="/">&larr; Dashboard</a>
-    <h1 class="detail-head" style="font-size:20px">Escalation queue</h1>
-    <div class="detail-sub">Payments the agent deliberately handed to a
-      human. Decisions made here are recorded in the audit trail as
-      <b>actor: human</b>.</div>
+    <h1 class="detail-head" style="font-size:20px">Needs your attention</h1>
+    <div class="detail-sub">These are the payments the agent chose to stop
+      on rather than push further. Your decision is recorded in the payment's
+      history as <b>actor: human</b>.</div>
     {''.join(cards) or '<div class="panel" style="padding:14px 16px">'
-     'Queue is empty — nothing needs a human right now.</div>'}"""
+     'Nothing needs you right now — the agent is handling the rest.</div>'}"""
     return PAGE_SHELL.format(body=body, refresh="", right_slot="",
                              seg_recovered=SEG_RECOVERED)
 
@@ -524,10 +651,14 @@ def resolve_escalation(payment_id: str, decision: str = Form(...)):
             (payment_id,)).fetchone()
         # only queue members can be resolved, and only once
         if row is not None and row["recovery_status"] == "escalated":
+            # Human collections get their own status so they are never
+            # counted in the agent's recovery metrics.
+            new_status = ("recovered_manual" if decision == "recovered"
+                          else decision)
             with conn:
                 conn.execute(
                     "UPDATE payments SET recovery_status = ? WHERE id = ?",
-                    (decision, payment_id),
+                    (new_status, payment_id),
                 )
                 log_action(conn, payment_id, "human", "escalation_resolved", {
                     "decision": decision,
