@@ -191,6 +191,9 @@ def dashboard(cls: str = "", rec: str = "") -> str:
             "SELECT COUNT(*) n, COALESCE(SUM(amount_paise),0) amt "
             "FROM payments WHERE status != 'captured' AND recovery_status "
             "IN ('detected','in_progress','promised','none')").fetchone()
+        written_off = conn.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(amount_paise),0) amt "
+            "FROM payments WHERE recovery_status = 'written_off'").fetchone()
 
         classes = [r["failure_code"] for r in conn.execute(
             "SELECT DISTINCT failure_code FROM payments "
@@ -230,10 +233,16 @@ def dashboard(cls: str = "", rec: str = "") -> str:
             "SELECT ra.*, p.amount_paise FROM recovery_actions ra "
             "JOIN payments p ON p.id = ra.payment_id "
             "ORDER BY ra.id DESC LIMIT 30").fetchall()
+
+        promises = conn.execute(
+            "SELECT pr.*, p.amount_paise FROM promises pr "
+            "JOIN payments p ON p.id = pr.payment_id "
+            "ORDER BY pr.id DESC LIMIT 15").fetchall()
     finally:
         conn.close()
 
-    at_risk = recovered["amt"] + escalated["amt"] + pending["amt"]
+    at_risk = (recovered["amt"] + escalated["amt"] + pending["amt"]
+               + written_off["amt"])
     pct = (lambda amt: 100 * amt / at_risk if at_risk else 0)
     rate = 100 * recovered["amt"] / at_risk if at_risk else 0
 
@@ -269,6 +278,8 @@ def dashboard(cls: str = "", rec: str = "") -> str:
           background:{SEG_PENDING}" title="pending"></div>
         <div style="width:{pct(escalated['amt']):.1f}%;
           background:{SEG_ESCALATED}" title="escalated"></div>
+        <div style="width:{pct(written_off['amt']):.1f}%;
+          background:#98a2b3" title="written off"></div>
       </div>
       <div class="legend">
         <span><span class="swatch" style="background:{SEG_RECOVERED}"></span>
@@ -277,6 +288,8 @@ def dashboard(cls: str = "", rec: str = "") -> str:
           Pending {rupees(pending['amt'])}</span>
         <span><span class="swatch" style="background:{SEG_ESCALATED}"></span>
           Escalated {rupees(escalated['amt'])}</span>
+        <span><span class="swatch" style="background:#98a2b3"></span>
+          Written off {rupees(written_off['amt'])}</span>
       </div>
     </div>"""
 
@@ -317,6 +330,23 @@ def dashboard(cls: str = "", rec: str = "") -> str:
             style="width:{frac:.0f}%"></div></div>
         </div>""")
 
+    promise_color = {"received": "detected", "pending": "promised",
+                     "kept": "recovered", "broken": "failed",
+                     "closed": "written_off"}
+    promise_items = []
+    for pr in promises:
+        bg, fg = BADGE.get(promise_color.get(pr["status"], "written_off"))
+        due = (f" · due {pr['due_at'][:10]}" if pr["due_at"] else "")
+        promise_items.append(f"""
+        <div class="feed-item">
+          <a href="/payment/{pr['payment_id']}">{pr['payment_id']}</a>
+          · {rupees(pr['amount_paise'])}
+          <span class="badge" style="background:{bg};color:{fg}">
+            {pr['status']}</span>{due}
+          <div class="meta" style="font-style:italic">
+            “{pr['raw_reply']}”</div>
+        </div>""")
+
     feed_items = []
     for f in feed:
         link = (f' · <a href="{f["rzp_link_url"]}" target="_blank">link</a>'
@@ -351,6 +381,11 @@ def dashboard(cls: str = "", rec: str = "") -> str:
         <div class="panel">
           <div class="panel-head"><h2>Recovery rate by failure class</h2></div>
           <div class="classbar">{''.join(class_rows)}</div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Customer promises</h2></div>
+          <div class="feed">{''.join(promise_items) or
+            '<div class="feed-item">No customer replies yet.</div>'}</div>
         </div>
         <div class="panel">
           <div class="panel-head"><h2>Recent actions</h2></div>
