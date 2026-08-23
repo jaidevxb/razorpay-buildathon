@@ -6,41 +6,44 @@ in a second window before you start talking.
 Every command runs from the project root with the venv active
 (`.\.venv\Scripts\activate`, or prefix commands with `.\.venv\Scripts\`).
 
-## 0. Start clean
+## 0. BEFORE you hit record
+
+Do not film the setup. Creating a hundred Razorpay orders under a rate limit
+and making forty-five Gemini calls takes **four to six minutes of watching a
+progress counter**, and there is nothing to see. Run it first:
 
 ```
-python -m app.reset --yes
-uvicorn app.main:app --port 8100        # dashboard: http://127.0.0.1:8100
+python -m app.prep_demo
 ```
 
-## 1. Seed the batch (real Razorpay test-mode orders)
+That wipes state, seeds 100 real Razorpay test orders, detects, diagnoses with
+Gemini, and plans the bounded actions — then stops. Nothing is skipped or
+faked; it is the real pipeline, run early. It prints a summary ending in
+`Recovered 0`, which is the number that moves on camera.
+
+Then start the dashboard **in a separate terminal** and leave it running:
 
 ```
-python -m app.simulator --count 100
+uvicorn app.main:app --port 8100        # http://127.0.0.1:8100
 ```
 
-~100 orders appear in the Razorpay test dashboard. Locally: 100 payments,
-roughly 45 of them failed/abandoned — the at-risk revenue.
+> **Stop the dashboard before re-running `prep_demo`.** On Windows the running
+> server holds `reclaim.db` open and the reset cannot delete it. The script
+> will tell you so rather than crashing, but it costs you a take.
 
-## 2. Detect and diagnose
+**Now hit record.** The opening shot is a dashboard showing ~₹1.1 lakh at risk,
+45 payments diagnosed, and ₹0 won back. Steps 1–3 below already happened —
+narrate them over the dashboard rather than re-running them.
 
-```
-python -m app.detector
-python -m app.diagnoser --limit 50
-```
+## 1–3. Narrate what is already on screen
 
-Detection is plain SQL (no AI needed for a yes/no question). Diagnosis is
-Gemini: root cause + recommended action + drafted customer message per
-failure, visible on each payment's detail page.
+Point at the table. Every row is a real failed payment with a real Razorpay
+order behind it. The **What happened** column is the gateway's failure code;
+the **Why** column is Gemini's diagnosis of it; detection itself was plain SQL,
+because "did this payment fail" is a question the database already answers.
 
-## 3. Plan recoveries (policy engine)
-
-```
-python -m app.policy
-```
-
-Watch the dashboard: fraud-suspected payments jump straight to *escalated* —
-hard rule, the LLM's advice is never consulted for money safety.
+Point at the fraud rows sitting in *needs you*: the policy engine refused them
+before any action existed, and the LLM's opinion was never consulted.
 
 ## 4. Execute — SHOWPIECE 1: kill and resume
 
@@ -164,6 +167,23 @@ signatures without writing anything.
 Dashboard shows the final split: recovered / escalated / written off / let go,
 the recovery rate per failure class and per payment method, banks on hold, and
 every payment's full audit trail.
+
+## If something goes wrong mid-take
+
+- **A step errors on camera.** Don't cut. This is a project about failure
+  recovery — reading the error out loud and re-running is on-message, and
+  every command here is safe to repeat (that is what idempotency is for).
+- **The executor prints `rate limited, waiting 32s`.** Expected under
+  Razorpay's test limits. Say what it is and move on; the backoff is the
+  feature.
+- **`reset` refuses to delete the database.** The dashboard is still running.
+  Stop it and retry.
+- **You need to start over completely.** `python -m app.prep_demo` again —
+  about five minutes, and the batch is seeded so it reproduces the same
+  payments and the same failures every time.
+- **The hosted demo shows different numbers than your local run.** It serves a
+  committed snapshot. Rebuild it with `python -m app.make_demo_db` and push if
+  you want them identical — not required, both are real batches.
 
 ## Honest-simulation disclosure
 
