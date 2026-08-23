@@ -29,13 +29,22 @@ Working draft of the application-form answers and the pitch-video script.
 > beats recovery rate. Every action lands in an append-only audit trail with
 > its reasoning, the whole run is crash-safe (kill the executor mid-batch;
 > it reconciles against Razorpay on restart with zero double-charges), and
-> 42 tests pin the safety invariants — including that the LLM can never move
-> money. It is also hardened against prompt injection: a customer reply is
+> 59 tests pin the safety invariants — including that the LLM can never move
+> money. It splits results by payment method, surfacing what a blended
+> success rate hides — cards are paid on the first try only 43% of the time
+> against UPI's 60% — and it treats attempts as a budget, holding payments on
+> a bank that is currently failing far above the norm rather than spending one
+> of three allowed attempts on a request that cannot succeed. It is also
+> hardened against prompt injection: a customer reply is
 > attacker-controlled text, and attacking my own agent proved a payload could
 > make it forgive a debt, which led to screening replies before the model ever
 > sees them and scaling autonomy to what a decision costs.
 
 **GitHub repo:** https://github.com/jaidevxb/razorpay-buildathon
+
+**Live dashboard:** _(paste the Render URL here once deployed — read-only,
+no keys, judges can click straight into a finished batch. Open it a minute
+before the panel: the free tier sleeps and cold-starts in ~50s.)_
 
 **Build challenges & technical obstacles** (the long answer is CHALLENGES.md
 in the repo; condensed):
@@ -131,9 +140,15 @@ made the agent forgive a ₹4,800 debt. I found it by attacking my own system.
 Now replies are screened before the model sees them, and forfeiting money
 needs a human."
 
-**4:35–5:00 — Close with the numbers.** Scroll to the comparison table.
+**4:35–4:50 — Where the money leaks.** Point at the per-method panel. "A
+blended success rate hides this. UPI pays 60% first try, cards only 43% — and
+cards are where the agent wins most back. And SBI is failing 67% against a 45%
+norm, so its payments are held rather than attempted. Attempts are a budget of
+three; you don't spend one while the bank is broken."
+
+**4:50–5:00 — Close with the numbers.** Scroll to the comparison table.
 "Same batch through blind retry ×3 — what most merchants do — recovers 45%.
 The agent recovers 85% with 40% fewer attempts, zero fraud retries, zero
-attempts on dead cards. And `python -m pytest`: 18 tests proving the LLM can
-never move money. Everything that broke building this is in CHALLENGES.md —
-that was the most educational part."
+doomed charge retries on dead cards. And `python -m pytest`: 59 tests proving
+the LLM can never move money. Everything that broke building this is in
+CHALLENGES.md — that was the most educational part."

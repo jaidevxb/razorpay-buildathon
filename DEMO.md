@@ -1,6 +1,8 @@
 # Demo runbook
 
 The full pipeline, start to finish, with the three showpiece moments marked.
+If you are recording, read step 0 first — the dashboard should already be open
+in a second window before you start talking.
 Every command runs from the project root with the venv active
 (`.\.venv\Scripts\activate`, or prefix commands with `.\.venv\Scripts\`).
 
@@ -113,7 +115,28 @@ the recovery, 60% more attempts, retries against suspected fraud, 18 attempts
 on dead cards, and it can't hear a customer say no. Also rendered as the
 comparison table on the dashboard.
 
-## 9. What the agent itself costs
+## 9. Where the money actually leaks
+
+```
+python -m app.health
+```
+
+Two things a blended success rate hides, both also on the dashboard in
+"Where you're losing money" and "Bank trouble":
+
+- **Per method.** UPI is 60% paid on the first try, cards only 43% — and
+  cards are where the agent recovers most (43% → 86%). Averaged together
+  that's an unremarkable-looking number and the card problem is invisible.
+- **Per bank.** SBI is failing 67% of recovery attempts against a 45% batch
+  norm, so its payments are **held rather than attempted — and the attempt is
+  not consumed.** Attempts are a budget of three; spending one while a bank is
+  broken wastes it.
+
+Say the line: *"The threshold is relative to the batch norm, not a fixed
+number. A fixed one flags every bank on a bad day and misses a broken one on
+a good day."*
+
+## 10. What the agent itself costs
 
 ```
 python -m app.roi
@@ -123,21 +146,24 @@ LLM calls + outreach, priced from published rates: about ₹11.60 to recover
 ₹96,433 — roughly ₹0.01 per ₹100 recovered. Also shown on the dashboard next
 to the resolution bar.
 
-## 10. Proof, not vibes
+## 11. Proof, not vibes
 
 ```
 python -m pytest
 ```
 
-42 tests on the money-path invariants: fraud never retried regardless of LLM
-output, amount cap enforced, attempt 4 impossible, crash reconciliation never
-duplicates, refusals always stop contact, and webhooks reject bad signatures
-without writing anything.
+59 tests on the money-path invariants: fraud is never retried regardless of
+LLM output and has no side door through the reply channel, settled payments
+can't be reopened, the amount cap holds, attempt 4 is impossible, crash
+reconciliation never duplicates, refusals always stop contact, injection
+payloads are screened without a model call, and webhooks reject bad
+signatures without writing anything.
 
-## 11. Read the result
+## 12. Read the result
 
-Dashboard shows the final split: recovered / escalated / written off, the
-recovery rate per failure class, and every payment's full audit trail.
+Dashboard shows the final split: recovered / escalated / written off / let go,
+the recovery rate per failure class and per payment method, banks on hold, and
+every payment's full audit trail.
 
 ## Honest-simulation disclosure
 
