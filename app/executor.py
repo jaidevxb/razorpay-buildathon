@@ -28,7 +28,7 @@ import razorpay
 
 from app import config
 from app.db import get_conn, init_db, log_action, utcnow
-from app.policy import MAX_ATTEMPTS
+from app.policy import MAX_ATTEMPTS, schedule_for
 
 REQUEST_GAP_SECONDS = 2.0   # payment-link API is rate-limited harder than orders
 MAX_API_RETRIES = 8
@@ -274,11 +274,13 @@ def _finish_action(conn, client, row, reconciling=False) -> None:
             else:
                 nxt = row["attempt"] + 1
                 key = f"{pid}:{row['action']}:{nxt}"
+                when, why_then = schedule_for(
+                    row["action"], row["failure_code"], nxt)
                 conn.execute(
                     "INSERT OR IGNORE INTO recovery_actions "
-                    "(payment_id, action, attempt, idempotency_key, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (pid, row["action"], nxt, key, utcnow()),
+                    "(payment_id, action, attempt, idempotency_key, "
+                    "scheduled_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (pid, row["action"], nxt, key, when, utcnow()),
                 )
                 conn.execute(
                     "UPDATE payments SET retry_count = ? WHERE id = ?",
@@ -286,24 +288,33 @@ def _finish_action(conn, client, row, reconciling=False) -> None:
                 )
                 log_action(conn, pid, "executor", "next_attempt_planned", {
                     "attempt": nxt,
-                    "cooldown_note": "production would wait hours/days here",
+                    "scheduled_at": when,
+                    "timing": why_then,
                 })
 
 
-def run_pass(client=None, pace_seconds: float = 0.0) -> int:
-    """Execute every currently-planned action once. Returns actions handled."""
+def run_pass(client=None, pace_seconds: float = 0.0,
+             force_due: bool = False) -> int:
+    """Execute planned actions whose scheduled time has arrived.
+
+    force_due ignores the timing policy (demo pacing: a salary-day retry
+    scheduled for the 1st shouldn't hold a 5-minute video hostage).
+    """
     init_db()
     client = client or _client()
     conn = get_conn()
     try:
         handled = reconcile_in_flight(conn, client)
 
+        due_clause = ("" if force_due else
+                      " AND (ra.scheduled_at IS NULL OR ra.scheduled_at <= ?)")
+        params = [] if force_due else [utcnow()]
         rows = conn.execute(
             "SELECT ra.*, p.amount_paise, p.customer_name, p.customer_email, "
             "       p.customer_phone, p.failure_code "
             "FROM recovery_actions ra JOIN payments p ON p.id = ra.payment_id "
-            "WHERE ra.state = 'planned' ORDER BY ra.id"
-        ).fetchall()
+            f"WHERE ra.state = 'planned'{due_clause} ORDER BY ra.id",
+            params).fetchall()
         for row in rows:
             # Mark in-flight BEFORE the external call and commit, so a crash
             # here leaves evidence for reconciliation.
@@ -334,12 +345,14 @@ if __name__ == "__main__":
                         help="run passes until no planned actions remain")
     parser.add_argument("--pace", type=float, default=0.0,
                         help="seconds to pause between actions (demo pacing)")
+    parser.add_argument("--force-due", action="store_true",
+                        help="ignore scheduled_at (demo pacing)")
     args = parser.parse_args()
 
     client = _client()
     total = 0
     while True:
-        n = run_pass(client, args.pace)
+        n = run_pass(client, args.pace, force_due=args.force_due)
         total += n
         if not args.loop or n == 0:
             break

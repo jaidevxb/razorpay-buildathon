@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS recovery_actions (
     state           TEXT NOT NULL DEFAULT 'planned',
         -- planned | executing | succeeded | failed
     idempotency_key TEXT NOT NULL UNIQUE,
+    scheduled_at    TEXT,             -- earliest execution time (timing policy)
     rzp_link_id     TEXT,             -- real Razorpay payment-link id, if any
     rzp_link_url    TEXT,
     result          TEXT,             -- JSON outcome detail
@@ -98,6 +99,12 @@ def get_conn() -> sqlite3.Connection:
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        # lightweight migration for databases created before the column existed
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(recovery_actions)")}
+        if "scheduled_at" not in cols:
+            conn.execute(
+                "ALTER TABLE recovery_actions ADD COLUMN scheduled_at TEXT")
 
 
 def log_action(conn: sqlite3.Connection, payment_id: str, actor: str,

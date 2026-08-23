@@ -17,10 +17,51 @@ Hard rules, in priority order:
 Run:  python -m app.policy
 """
 
+from datetime import datetime, timedelta, timezone
+
 from app.db import get_conn, init_db, log_action, utcnow
 
 MAX_ATTEMPTS = 3
 AMOUNT_CAP_PAISE = 10_000 * 100  # above Rs.10,000 a human must approve
+
+# WHEN to act matters as much as what to do. Retrying an empty account at
+# 2am fails again; a UPI re-request minutes later catches warm intent.
+RETRY_DELAY_HOURS = {
+    "GATEWAY_ERROR": 2,      # bank outages typically clear within hours
+    "UPI_TIMEOUT": 0.25,     # re-request while purchase intent is warm
+    "CHECKOUT_ABANDONED": 1, # gentle nudge, not an instant chase
+}
+LINK_RESEND_GAP_HOURS = 24   # between link reminders — more is spam
+TIMING_RATIONALE = {
+    "GATEWAY_ERROR": "bank outages typically clear within hours",
+    "UPI_TIMEOUT": "re-request quickly while purchase intent is warm",
+    "CHECKOUT_ABANDONED": "nudge after an hour, not instantly",
+    "INSUFFICIENT_FUNDS": "deferred to the next salary window (1st of "
+                          "month) — retrying an empty account tonight "
+                          "fails again",
+}
+
+
+def schedule_for(action: str, failure_code: str, attempt: int) -> tuple:
+    """Return (iso timestamp, rationale) for when an attempt should run.
+
+    First contact (a payment link) goes out immediately; what gets timed is
+    retries and reminders.
+    """
+    now = datetime.now(timezone.utc)
+    if action == "retry" and failure_code == "INSUFFICIENT_FUNDS":
+        # next 1st of the month, 10:00 IST — the salary window
+        first = (now.replace(day=1) + timedelta(days=32)).replace(
+            day=1, hour=4, minute=30, second=0, microsecond=0)
+        return first.isoformat(), TIMING_RATIONALE["INSUFFICIENT_FUNDS"]
+    if action == "retry":
+        hours = RETRY_DELAY_HOURS.get(failure_code, 1) * attempt
+        return ((now + timedelta(hours=hours)).isoformat(),
+                TIMING_RATIONALE.get(failure_code, "spaced retry"))
+    if attempt == 1:
+        return now.isoformat(), "first contact goes out immediately"
+    return ((now + timedelta(hours=LINK_RESEND_GAP_HOURS)).isoformat(),
+            f"{LINK_RESEND_GAP_HOURS}h between reminders — more is spam")
 
 # failure class -> (allowed actions for the LLM to pick, policy default)
 ACTION_POLICY = {
@@ -83,12 +124,13 @@ def plan() -> dict:
                 stats["llm_overridden"] += 1
 
             key = f"{pid}:{action}:1"
+            when, why_then = schedule_for(action, code, 1)
             with conn:
                 conn.execute(
                     "INSERT OR IGNORE INTO recovery_actions "
-                    "(payment_id, action, attempt, idempotency_key, created_at) "
-                    "VALUES (?, ?, 1, ?, ?)",
-                    (pid, action, key, utcnow()),
+                    "(payment_id, action, attempt, idempotency_key, "
+                    "scheduled_at, created_at) VALUES (?, ?, 1, ?, ?, ?)",
+                    (pid, action, key, when, utcnow()),
                 )
                 conn.execute(
                     "UPDATE payments SET recovery_status = 'in_progress' "
@@ -101,6 +143,8 @@ def plan() -> dict:
                     "allowed_for_class": sorted(allowed),
                     "attempt": 1,
                     "max_attempts": MAX_ATTEMPTS,
+                    "scheduled_at": when,
+                    "timing": why_then,
                     "idempotency_key": key,
                 })
             stats["planned"] += 1
