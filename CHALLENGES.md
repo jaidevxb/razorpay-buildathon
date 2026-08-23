@@ -149,3 +149,63 @@ Tested at both depths in `tests/test_injection.py` (19 tests): the screen
 catches the payloads without a model, and — assuming an attacker got past both
 the screen *and* fully compromised the model — the policy layer still refuses
 to forfeit a meaningful sum without a human.
+
+## 2026-08-23 — The fraud rule had a side door, and settled payments could reopen
+
+**What broke:** Auditing the running database after the injection work, one row
+did not look right. `pay_sim_0058` — a FRAUD_SUSPECTED payment the policy
+engine had refused to touch, and that a human had then closed from the
+escalation queue — was sitting in `promised` state with a live promise
+attached. Its audit trail read:
+
+```
+policy           escalated_to_human        <- refused: fraud
+human            escalation_resolved       <- person closed it
+reply-screen     reply_quarantined
+promise-tracker  promise_registered        <- back in the pipeline
+```
+
+Two separate bugs, both from the same root cause: **the reply channel wrote
+payment state without ever checking what that state already was.**
+
+1. **Fraud had a side door.** The policy engine refuses FRAUD_SUSPECTED
+   payments, but the promise tracker never looked at the failure class. An
+   ordinary, entirely benign reply — "haan bhai Friday ko pakka kar dunga" —
+   pulled a fraud-flagged payment back into recovery. When that promise came
+   due it would have been marked `recovered`. No injection needed; the
+   flagship safety guarantee had a route around it.
+2. **Terminal states could reopen.** `recovered`, `recovered_manual` and
+   `written_off` are settled — money has moved or been formally given up, and
+   a human may have signed off. A late reply overwrote them anyway. In
+   production: a customer pays, then replies "cancel it", and a recovered
+   payment silently becomes escalated or written off.
+
+**Fix:** one guard, `_blocked_reason()`, consulted at *both* entry points —
+when a reply is parsed and again when a promise falls due, because a payment
+can settle in between. Blocked replies are still filed and logged; they simply
+do not move payment state. Ten tests in `tests/test_state_guards.py` cover
+every terminal state on both paths.
+
+**The lesson, which is the same one as entry 7 in a different disguise:** a
+safety rule enforced at one entry point is not enforced. The fraud rule lived
+in the policy engine, so it held for the route through the policy engine — and
+the reply channel walked straight past it. Rules about money belong on the
+state transition itself, not on one of the paths that reaches it.
+
+## 2026-08-23 — Our own headline comparison was measuring two different things
+
+**What broke:** The agent-vs-baseline table claimed "Attempts on dead (expired)
+cards: 0 for the agent, 18 for blind retry." The agent's figure counted only
+actions of type `retry`, while the baseline's counted *every* attempt. The
+agent had in fact made 12 contacts about expired cards — it asks those
+customers for a new card, which is the correct action and can actually work.
+
+Nothing was mis-recovered; the code was right and the *label* was wrong. But
+the whole project's claim rests on its numbers being honest, and a metric that
+quietly compares a filtered count against an unfiltered one is exactly the
+kind of thing that should be caught before a judge catches it.
+
+**Fix:** report both rows — "Contacts about expired cards" (12 vs 18) and
+"...of those, charge retries that could never succeed" (0 vs 18). The honest
+version is a better argument anyway: the agent is not avoiding these customers,
+it is contacting them with something that can work.
