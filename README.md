@@ -67,7 +67,7 @@ decides and acts.** Money never moves on a model's say-so.
 - **A real seat for the human** — the escalation queue (`/escalations`) shows
   why the agent stopped on each case; a person's decision lands in the same
   audit trail as `actor: human`.
-- **Tested invariants** — `python -m pytest` runs 18 tests proving the
+- **Tested invariants** — `python -m pytest` runs 23 tests proving the
   dangerous properties: fraud is never retried regardless of LLM output, the
   amount cap holds, attempt 4 never happens, crashes reconcile without
   duplicates, a refusal always stops contact.
@@ -79,6 +79,14 @@ decides and acts.** Money never moves on a model's say-so.
 - **Total accountability** — an append-only audit log records every action by
   every component *with its reasoning*. The dashboard renders it per payment.
 - **Privacy** — only the customer's first name is ever sent to the LLM.
+- **It knows what it costs** — the agent's own bill (LLM calls + outreach)
+  is tracked: ₹11.60 total for this batch, about ₹0.01 per ₹100 recovered
+  (`python -m app.roi`, assumptions in the file).
+- **Webhook-first ingestion** — `POST /webhooks/razorpay` ingests
+  `payment.failed` events and `payment_link.paid` confirmations with
+  mandatory HMAC-SHA256 signature verification (constant-time compare,
+  idempotent against Razorpay's redelivery). Polling is for demos; webhooks
+  are how production hears about failures.
 
 ## What's real and what's simulated
 
@@ -105,7 +113,7 @@ python -m app.executor --loop --force-due  # execute (kill it mid-run — safe)
 python -m app.promises --parse        # parse customer replies
 python -m app.promises --resolve --force
 python -m app.baseline                # compare vs blind-retry baseline
-python -m pytest                      # 18 tests on the money path
+python -m pytest                      # 23 tests on the money path
 uvicorn app.main:app --port 8100      # dashboard
 ```
 
@@ -129,8 +137,9 @@ app/
   executor.py    idempotent execution, crash reconciliation, quota fallback
   promises.py    promise-to-pay: Gemini parsing + deterministic outcomes
   baseline.py    blind-retry baseline for the honest comparison
-  main.py        FastAPI dashboard + escalation queue
+  roi.py         what the agent itself costs per rupee recovered
+  main.py        FastAPI dashboard + escalation queue + signed webhooks
   db.py          SQLite schema incl. append-only audit log
   reset.py       wipe local state for a fresh demo
-tests/           18 tests on the invariants that make this safe near money
+tests/           23 tests on the invariants that make this safe near money
 ```

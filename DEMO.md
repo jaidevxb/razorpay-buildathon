@@ -94,17 +94,28 @@ the recovery, 60% more attempts, retries against suspected fraud, 18 attempts
 on dead cards, and it can't hear a customer say no. Also rendered as the
 comparison table on the dashboard.
 
-## 8. Proof, not vibes
+## 8. What the agent itself costs
+
+```
+python -m app.roi
+```
+
+LLM calls + outreach, priced from published rates: about ₹11.60 to recover
+₹96,433 — roughly ₹0.01 per ₹100 recovered. Also shown on the dashboard next
+to the resolution bar.
+
+## 9. Proof, not vibes
 
 ```
 python -m pytest
 ```
 
-18 tests on the money-path invariants: fraud never retried regardless of LLM
+23 tests on the money-path invariants: fraud never retried regardless of LLM
 output, amount cap enforced, attempt 4 impossible, crash reconciliation never
-duplicates, refusals always stop contact.
+duplicates, refusals always stop contact, and webhooks reject bad signatures
+without writing anything.
 
-## 9. Read the result
+## 10. Read the result
 
 Dashboard shows the final split: recovered / escalated / written off, the
 recovery rate per failure class, and every payment's full audit trail.
