@@ -42,9 +42,11 @@ Working draft of the application-form answers and the pitch-video script.
 
 **GitHub repo:** https://github.com/jaidevxb/razorpay-buildathon
 
-**Live dashboard:** _(paste the Render URL here once deployed — read-only,
-no keys, judges can click straight into a finished batch. Open it a minute
-before the panel: the free tier sleeps and cold-starts in ~50s.)_
+**Live dashboard:** https://razorpay-buildathon-dlho.onrender.com
+
+Read-only, no API keys, a real finished batch — click any payment id for its
+full audit trail. Open it a minute before the panel: the free tier sleeps and
+cold-starts in ~50s.
 
 **Build challenges & technical obstacles** (the long answer is CHALLENGES.md
 in the repo; condensed):

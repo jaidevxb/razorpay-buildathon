@@ -217,7 +217,7 @@ PAGE_SHELL = """<!doctype html>
 <header>
   <div class="brand">Reclaim<small>Wins back your failed payments</small></div>
   <div style="display:flex;align-items:center;gap:14px">
-    <span class="pulse"><i></i>agent watching payments</span>
+    <span class="pulse">{pulse}</span>
     {right_slot}
     {demo_slot}
     <span class="env">RAZORPAY TEST MODE</span>
@@ -258,6 +258,9 @@ def shell(body: str, refresh: str = "", right_slot: str = "") -> str:
     return PAGE_SHELL.format(
         body=body, refresh=refresh, right_slot=right_slot,
         demo_slot=DEMO_BADGE if READONLY else "",
+        # Don't claim the agent is watching when it demonstrably isn't.
+        pulse=("a finished batch" if READONLY
+               else "<i></i>agent watching payments"),
         seg_recovered=SEG_RECOVERED)
 
 
@@ -690,6 +693,29 @@ def escalations() -> str:
     finally:
         conn.close()
 
+    # A control that cannot work should not look like it can. On the public
+    # demo the buttons are replaced with an explanation rather than left
+    # clickable to fail with a 403.
+    if READONLY:
+        decide_controls = (
+            '<span style="font-size:12px;color:#8b95a1">'
+            'Decisions are disabled on the public demo</span>')
+    else:
+        decide_controls = """
+            <form method="post" action="/escalations/{pid}"
+                  style="display:flex;gap:8px">
+              <button name="decision" value="recovered"
+                style="font:inherit;font-size:12px;padding:4px 12px;
+                       border-radius:5px;border:1px solid #1e7f4f;
+                       background:#e7f4ec;color:#1e7f4f;cursor:pointer">
+                Collected manually</button>
+              <button name="decision" value="written_off"
+                style="font:inherit;font-size:12px;padding:4px 12px;
+                       border-radius:5px;border:1px solid #d4d9df;
+                       background:#fff;color:#3d4854;cursor:pointer">
+                Write off</button>
+            </form>"""
+
     cards = []
     for r in rows:
         reason = "—"
@@ -706,19 +732,7 @@ def escalations() -> str:
               · {r['customer_name']} · {rupees(r['amount_paise'])}
               · {FAILURE_LABEL.get(r['failure_code'], r['failure_code'])}
             </div>
-            <form method="post" action="/escalations/{r['id']}"
-                  style="display:flex;gap:8px">
-              <button name="decision" value="recovered"
-                style="font:inherit;font-size:12px;padding:4px 12px;
-                       border-radius:5px;border:1px solid #1e7f4f;
-                       background:#e7f4ec;color:#1e7f4f;cursor:pointer">
-                Collected manually</button>
-              <button name="decision" value="written_off"
-                style="font:inherit;font-size:12px;padding:4px 12px;
-                       border-radius:5px;border:1px solid #d4d9df;
-                       background:#fff;color:#3d4854;cursor:pointer">
-                Write off</button>
-            </form>
+            {decide_controls.format(pid=r['id'])}
           </div>
           <div style="color:#5b6774;font-size:13px;margin-top:6px">
             Why the agent stopped: {reason}</div>

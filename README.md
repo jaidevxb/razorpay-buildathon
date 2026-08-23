@@ -2,6 +2,10 @@
 
 **Razorpay Buildathon · Track 3 (AI Revenue Recovery)**
 
+**▸ Live dashboard: https://razorpay-buildathon-dlho.onrender.com** — a real
+finished batch, read-only, no keys needed. Click any payment id to see the
+agent's full reasoning. (Free tier sleeps; first load takes ~50s.)
+
 Merchants lose revenue quietly: a card declines, a UPI request times out, a
 checkout gets abandoned — and usually nobody follows up. Reclaim is an agent
 that finds that at-risk revenue, works out *why* each payment failed, chooses

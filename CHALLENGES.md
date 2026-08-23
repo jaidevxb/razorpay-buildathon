@@ -209,3 +209,34 @@ kind of thing that should be caught before a judge catches it.
 "...of those, charge retries that could never succeed" (0 vs 18). The honest
 version is a better argument anyway: the agent is not avoiding these customers,
 it is contacting them with something that can work.
+
+## 2026-08-23 — Read-only mode was only half built
+
+**What broke:** Reported from the deployed dashboard: the page was reloading
+every five seconds. The dashboard carries a `<meta http-equiv="refresh">` so
+the recovered figure visibly climbs while the executor runs — useful live,
+pointless on a finished batch that cannot change, and actively harmful because
+a reload throws the reader back to the top of the page mid-scroll.
+
+Checking whether that was the only place that assumed a live deployment turned
+up two more, one of them worse:
+
+- The header pulse said **"agent watching payments"** on a batch where nothing
+  was running. A small lie, on the page whose entire argument is honesty.
+- The escalation queue still rendered **"Collected manually" and "Write off"
+  as ordinary buttons.** `DEMO_READONLY` correctly refused the POST — with a
+  raw `403` error page. So a judge clicking a control that looked live got a
+  stack-trace-shaped error instead of an explanation.
+
+**Fix:** all three are mode-aware now. No auto-refresh and no false "watching"
+claim when read-only, and the decision buttons are replaced by the sentence
+"Decisions are disabled on the public demo" rather than left clickable to
+fail. Both modes were then re-verified end to end.
+
+**The lesson:** read-only had been implemented as *"block the writes"*, which
+is the security half and only the security half. The interface went on
+advertising capabilities the deployment no longer had. **A control that cannot
+work should not look like it can** — a refusal a user runs into is a worse
+outcome than a control that was never offered. Enforcing a mode in the backend
+without teaching the frontend about it produces a system that is safe and
+still lies to the person using it.
