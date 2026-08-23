@@ -19,11 +19,18 @@ Working draft of the application-form answers and the pitch-video script.
 > policy engine (the LLM advises, it never moves money), executes it via
 > Razorpay APIs with idempotency keys, and tracks customers' promise-to-pay
 > replies in Hinglish. On the demo batch it recovered ₹96,433 of ₹112,865
-> at-risk revenue (85%), escalated 6 payments to a human under its stopping
-> rules, and wrote one off because the customer refused — compliance beats
-> recovery rate. Every action is recorded in an append-only audit trail with
-> its reasoning, and the whole run is crash-safe: kill the executor mid-batch
-> and it reconciles against Razorpay on restart with zero double-charges.
+> at-risk revenue (85%) — measured against a blind-retry baseline on the same
+> seeded batch, which manages only 45% while making 60% more attempts,
+> retrying suspected fraud 4 times and hammering dead cards 18 times.
+> Recovery timing is policy too: insufficient-funds retries wait for the
+> salary window, outage retries wait hours, reminders sit 24h apart. It
+> escalated 6 payments to a human queue where decisions are audit-logged as
+> actor:human, and wrote one off because the customer refused — compliance
+> beats recovery rate. Every action lands in an append-only audit trail with
+> its reasoning, the whole run is crash-safe (kill the executor mid-batch;
+> it reconciles against Razorpay on restart with zero double-charges), and
+> 18 tests pin the safety invariants — including that the LLM can never move
+> money.
 
 **GitHub repo:** https://github.com/jaidevxb/razorpay-buildathon
 
@@ -69,12 +76,15 @@ climb, **Ctrl+C mid-run**. Show the action frozen in `executing`. Restart.
 Show the `reconciling_in_flight_action` audit entry. "Nothing double-charged.
 Crash-safety isn't a slide in this deck, you just watched it."
 
-**3:45–4:30 — Promises.** Show the Customer promises panel: "salary aane do,
-Friday ko pakka kar dunga" → Gemini parses the Hinglish, policy tracks it.
-Point at the refusal: "This customer said no. We stopped contacting them and
-wrote it off. Compliance beats recovery rate."
+**3:45–4:20 — Promises + the human's seat.** Customer promises panel:
+"salary aane do, Friday ko pakka kar dunga" → Gemini parses the Hinglish,
+policy tracks it. Point at the refusal: "They said no. Contact stopped,
+written off." Then 10 seconds on /escalations: click a decision, show it in
+the audit trail as actor: human.
 
-**4:30–5:00 — Close.** Final dashboard. "₹96,433 of ₹112,865 recovered —
-85% — with stopping rules, full audit trail, and honest disclosure of what's
-simulated. Everything that broke building this is in CHALLENGES.md, because
+**4:20–5:00 — Close with the numbers.** Scroll to the comparison table.
+"Same batch through blind retry ×3 — what most merchants do — recovers 45%.
+The agent recovers 85% with 40% fewer attempts, zero fraud retries, zero
+attempts on dead cards. And `python -m pytest`: 18 tests proving the LLM can
+never move money. Everything that broke building this is in CHALLENGES.md —
 that was the most educational part."
