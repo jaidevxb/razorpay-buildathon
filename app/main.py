@@ -480,19 +480,26 @@ def dashboard(cls: str = "", rec: str = "") -> str:
 
     promise_color = {"received": "detected", "pending": "promised",
                      "kept": "recovered", "broken": "failed",
-                     "closed": "written_off"}
+                     "closed": "written_off", "quarantined": "failed"}
     promise_items = []
     for pr in promises:
         bg, fg = BADGE.get(promise_color.get(pr["status"], "written_off"))
         due = (f" · due {pr['due_at'][:10]}" if pr["due_at"] else "")
+        label = ("blocked" if pr["status"] == "quarantined" else pr["status"])
+        flag = ""
+        if pr["status"] == "quarantined":
+            flag = (f'<div class="meta" style="color:#b42318">'
+                    f'Not acted on — {pr["flag_reason"]}. Sent for review; '
+                    f'no money moved.</div>')
         promise_items.append(f"""
         <div class="feed-item">
           <a href="/payment/{pr['payment_id']}">{pr['payment_id']}</a>
           · {rupees(pr['amount_paise'])}
           <span class="badge" style="background:{bg};color:{fg}">
-            {pr['status']}</span>{due}
+            {label}</span>{due}
           <div class="meta" style="font-style:italic">
-            “{pr['raw_reply']}”</div>
+            “{pr['raw_reply'][:120]}”</div>
+          {flag}
         </div>""")
 
     feed_items = []
@@ -596,7 +603,8 @@ def escalations() -> str:
         rows = conn.execute(
             "SELECT p.*, d.root_cause, d.recommended_action, "
             "  (SELECT a.detail FROM audit_log a WHERE a.payment_id = p.id "
-            "   AND (a.action LIKE '%escalat%' OR a.action = 'promise_broken')"
+            "   AND (a.action LIKE '%escalat%' OR a.action = 'promise_broken'"
+            "        OR a.action = 'reply_quarantined')"
             "   ORDER BY a.id DESC LIMIT 1) esc_detail "
             "FROM payments p LEFT JOIN diagnoses d ON d.payment_id = p.id "
             "WHERE p.recovery_status = 'escalated' "
