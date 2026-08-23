@@ -1,0 +1,20 @@
+# Deploy the read-only dashboard to Render (free tier).
+#
+# The public demo serves a finished batch from a committed snapshot database.
+# It needs NO API keys: the Razorpay and Gemini work already happened locally,
+# and DEMO_READONLY blocks every mutating route. Nothing on the internet can
+# spend money or change state.
+services:
+  - type: web
+    name: reclaim-dashboard
+    runtime: python
+    plan: free
+    buildCommand: |
+      pip install -r requirements.txt
+      cp demo/reclaim-demo.db reclaim.db
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DEMO_READONLY
+        value: "1"
+      - key: PYTHON_VERSION
+        value: "3.12.6"

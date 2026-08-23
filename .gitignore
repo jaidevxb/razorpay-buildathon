@@ -6,6 +6,8 @@ __pycache__/
 *.pyc
 .venv/
 
-# Local database
+# Local database — but the demo snapshot IS committed so the hosted
+# read-only dashboard can serve a finished batch without any API keys.
 *.db
 *.sqlite3
+!demo/reclaim-demo.db
