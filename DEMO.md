@@ -43,14 +43,19 @@ hard rule, the LLM's advice is never consulted for money safety.
 ## 4. Execute — SHOWPIECE 1: kill and resume
 
 ```
-python -m app.executor --loop --pace 1
+python -m app.executor --loop --pace 1 --force-due
 ```
+
+(`--force-due` collapses the timing policy for demo pacing — in production an
+insufficient-funds retry waits for the salary window, an outage retry waits
+hours, link reminders sit 24h apart. Run once *without* the flag first to show
+actions being deliberately held back, with the rationale in the audit log.)
 
 Mid-run, hit **Ctrl+C**. The dashboard freezes with actions stuck in
 `executing`. Then:
 
 ```
-python -m app.executor --loop --pace 1
+python -m app.executor --loop --pace 1 --force-due
 ```
 
 The first thing the restarted executor does is reconcile in-flight actions
@@ -72,7 +77,34 @@ Gemini parses the Hinglish; deterministic policy decides: short promises are
 tracked, refusals stop contact immediately (written off), "already paid"
 claims and unclear replies go to a human.
 
-## 6. Read the result
+## 6. The human's seat — escalation queue
+
+Open **/escalations**: every case the agent deliberately stopped on, with the
+reason. Click "Collected manually" or "Write off" — the decision lands in the
+audit trail as `actor: human`.
+
+## 7. The honest comparison
+
+```
+python -m app.baseline
+```
+
+Same batch through blind auto-retry ×3 (what most merchants do): about half
+the recovery, 60% more attempts, retries against suspected fraud, 18 attempts
+on dead cards, and it can't hear a customer say no. Also rendered as the
+comparison table on the dashboard.
+
+## 8. Proof, not vibes
+
+```
+python -m pytest
+```
+
+18 tests on the money-path invariants: fraud never retried regardless of LLM
+output, amount cap enforced, attempt 4 impossible, crash reconciliation never
+duplicates, refusals always stop contact.
+
+## 9. Read the result
 
 Dashboard shows the final split: recovered / escalated / written off, the
 recovery rate per failure class, and every payment's full audit trail.

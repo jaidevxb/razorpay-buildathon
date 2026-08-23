@@ -13,6 +13,23 @@ trail.
 across 100 payments · 6 escalated to a human · 1 written off because the
 customer said no.
 
+## Measured against the strategy merchants actually use
+
+Same batch, same seeds, reproducible — the agent vs. blind auto-retry ×3
+(no diagnosis, no timing, no listening):
+
+| Metric | Reclaim agent | Blind retry ×3 |
+|---|---:|---:|
+| Recovered (clean) | **₹96,433 (85%)** | ₹50,601 (45%) |
+| "Recovered" from suspected fraud — a chargeback time bomb | ₹0 | ₹7,382 |
+| Attempts made | 66 | 108 |
+| Retries against suspected fraud | 0 | 4 |
+| Attempts on dead (expired) cards | 0 | 18 |
+| Customer refusals honoured | 1 | 0 |
+
+More money, fewer contacts, zero compliance violations. Reproduce it:
+`python -m app.baseline` (assumptions documented in the file).
+
 ## How it works
 
 ```mermaid
@@ -43,6 +60,17 @@ decides and acts.** Money never moves on a model's say-so.
 
 - **Stopping rules** — 3 attempts max, then a human. One promise per payment.
   No retry loops, ever.
+- **Timing is policy too** — insufficient-funds retries wait for the salary
+  window (1st of the month), outage retries wait hours, link reminders are
+  24h apart. When to act is decided by rules, with the rationale in the
+  audit log.
+- **A real seat for the human** — the escalation queue (`/escalations`) shows
+  why the agent stopped on each case; a person's decision lands in the same
+  audit trail as `actor: human`.
+- **Tested invariants** — `python -m pytest` runs 18 tests proving the
+  dangerous properties: fraud is never retried regardless of LLM output, the
+  amount cap holds, attempt 4 never happens, crashes reconcile without
+  duplicates, a refusal always stops contact.
 - **Compliance over recovery rate** — a customer's "no" is honoured on the
   spot (written off, contact stops). Fraud-flagged payments are untouchable.
 - **Crash safety** — actions are marked in-flight *before* any API call;
@@ -73,9 +101,11 @@ python -m app.simulator --count 100   # seed batch (real test-mode orders)
 python -m app.detector                # flag at-risk revenue
 python -m app.diagnoser --limit 50    # Gemini root-cause analysis
 python -m app.policy                  # plan bounded interventions
-python -m app.executor --loop         # execute (kill it mid-run — it's safe)
+python -m app.executor --loop --force-due  # execute (kill it mid-run — safe)
 python -m app.promises --parse        # parse customer replies
 python -m app.promises --resolve --force
+python -m app.baseline                # compare vs blind-retry baseline
+python -m pytest                      # 18 tests on the money path
 uvicorn app.main:app --port 8100      # dashboard
 ```
 
@@ -95,10 +125,12 @@ app/
   simulator.py   seed batch, real Razorpay orders, weighted failures
   detector.py    rule-based at-risk flagging
   diagnoser.py   Gemini diagnosis + message drafting
-  policy.py      deterministic decision rules and hard caps
+  policy.py      deterministic decision rules, hard caps, retry timing
   executor.py    idempotent execution, crash reconciliation, quota fallback
   promises.py    promise-to-pay: Gemini parsing + deterministic outcomes
-  main.py        FastAPI dashboard
+  baseline.py    blind-retry baseline for the honest comparison
+  main.py        FastAPI dashboard + escalation queue
   db.py          SQLite schema incl. append-only audit log
   reset.py       wipe local state for a fresh demo
+tests/           18 tests on the invariants that make this safe near money
 ```
