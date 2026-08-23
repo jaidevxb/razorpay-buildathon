@@ -18,12 +18,18 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.baseline import compare
 from app.db import get_conn, init_db, log_action
+from app.health import bank_health, method_breakdown
 from app.db import utcnow as db_utcnow
 from app.roi import compute as roi_compute
 
 app = FastAPI(title="Reclaim")
 
 init_db()
+
+# Public demo deployments run read-only: the dashboard shows a real finished
+# batch, but nobody on the internet can mutate it. Set DEMO_READONLY=1 to
+# enable. No API keys are needed to serve this — the batch is already run.
+READONLY = os.getenv("DEMO_READONLY", "").strip() in ("1", "true", "yes")
 
 # Merchant-facing language. Technical identifiers stay visible in tooltips
 # and on the audit/detail pages; the main screen answers a merchant's real
@@ -51,6 +57,8 @@ STATE_LABEL = {
     "executing": "in flight",
     "succeeded": "worked",
 }
+METHOD_LABEL = {"upi": "UPI", "card": "Cards",
+                "netbanking": "Net banking", "wallet": "Wallets"}
 ACTION_LABEL = {
     "retry": "retried the payment",
     "payment_link": "sent a payment link",
@@ -86,6 +94,7 @@ PAGE_SHELL = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {refresh}
 <title>Reclaim — Revenue Recovery</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f5c5a'/%3E%3Cpath d='M9 21V11h6a3.5 3.5 0 0 1 0 7h-2l5 3' stroke='%23fff' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   * {{ box-sizing: border-box; margin: 0; }}
   html {{ background: #f6f7f9; }}
@@ -141,7 +150,8 @@ PAGE_SHELL = """<!doctype html>
              font-variant-numeric: tabular-nums; }}
   .swatch {{ display: inline-block; width: 10px; height: 10px;
              border-radius: 2px; margin-right: 6px; vertical-align: -1px; }}
-  .cols {{ display: grid; grid-template-columns: minmax(0, 7fr) minmax(280px, 3fr);
+  .cols {{ display: grid;
+           grid-template-columns: minmax(0, 1fr) minmax(270px, 330px);
            gap: 16px; align-items: start; }}
   @media (max-width: 1080px) {{ .cols {{ grid-template-columns: 1fr; }} }}
   .panel {{ background: #fff; border: 1px solid #e3e6ea; border-radius: 8px;
@@ -156,7 +166,7 @@ PAGE_SHELL = """<!doctype html>
             border: 1px solid #d4d9df; border-radius: 5px;
             padding: 3px 6px; background: #fff; }}
   table {{ width: 100%; border-collapse: collapse; }}
-  th, td {{ text-align: left; padding: 8px 12px;
+  th, td {{ text-align: left; padding: 7px 9px;
             border-bottom: 1px solid #eef0f2; font-size: 13px;
             white-space: nowrap; }}
   td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
@@ -167,8 +177,9 @@ PAGE_SHELL = """<!doctype html>
   tbody tr:hover td {{ background: #f8fafc; }}
   .badge {{ display: inline-block; padding: 1px 8px; border-radius: 4px;
             font-size: 11.5px; font-weight: 600; }}
-  .cause {{ color: #5b6774; max-width: 260px; overflow: hidden;
+  .cause {{ color: #5b6774; max-width: 190px; overflow: hidden;
             text-overflow: ellipsis; }}
+  td.chan {{ font-size: 12.5px; }}
   .classbar {{ padding: 10px 16px; }}
   .classbar .row {{ margin-bottom: 10px; }}
   .classbar .lbl {{ display: flex; justify-content: space-between;
@@ -208,6 +219,7 @@ PAGE_SHELL = """<!doctype html>
   <div style="display:flex;align-items:center;gap:14px">
     <span class="pulse"><i></i>agent watching payments</span>
     {right_slot}
+    {demo_slot}
     <span class="env">RAZORPAY TEST MODE</span>
   </div>
 </header>
@@ -235,6 +247,18 @@ document.querySelectorAll('[data-count]').forEach(function (el) {{
 </script>
 </body>
 </html>"""
+
+
+DEMO_BADGE = ('<span class="env" style="background:#e8effc;color:#2456d6;'
+              'border-color:#c5d6f7">READ-ONLY DEMO</span>')
+
+
+def shell(body: str, refresh: str = "", right_slot: str = "") -> str:
+    """Render a page. Keeps the template's parameters in one place."""
+    return PAGE_SHELL.format(
+        body=body, refresh=refresh, right_slot=right_slot,
+        demo_slot=DEMO_BADGE if READONLY else "",
+        seg_recovered=SEG_RECOVERED)
 
 
 def esc_nav() -> str:
@@ -460,6 +484,8 @@ def dashboard(cls: str = "", rec: str = "") -> str:
           <td><a href="/payment/{r['id']}">{r['id']}</a></td>
           <td>{r['customer_name']}</td>
           <td class="num">{rupees(r['amount_paise'])}</td>
+          <td class="chan">{METHOD_LABEL.get(r['method'], r['method'] or '')}
+            <span style="color:#8b95a1">{r['bank'] or ''}</span></td>
           <td title="{r['failure_code'] or ''}">{fail}</td>
           <td class="cause">{r['root_cause'] or '—'}</td>
           <td class="num">{r['attempts'] or ''}</td>
@@ -477,6 +503,48 @@ def dashboard(cls: str = "", rec: str = "") -> str:
           <div class="track"><div class="fill"
             style="width:{frac:.0f}%"></div></div>
         </div>""")
+
+    method_rows = []
+    for m in method_breakdown():
+        first = m["first_pass_rate"] * 100
+        after = m["rate_after_recovery"] * 100
+        worst = first < 50
+        method_rows.append(f"""
+        <div class="row">
+          <div class="lbl">
+            <span>{METHOD_LABEL.get(m['method'], m['method'])}
+              <span style="color:#8b95a1">· {m['total']} payments</span></span>
+            <span>{first:.0f}% &rarr;
+              <b style="color:#1e7f4f">{after:.0f}%</b></span></div>
+          <div class="track">
+            <div class="fill" style="width:{after:.0f}%;
+              background:linear-gradient(90deg,
+              {'#b42318' if worst else '#c8871d'} 0 {first:.0f}%,
+              {SEG_RECOVERED} {first:.0f}% 100%)"></div>
+          </div>
+        </div>""")
+    method_html = (f'<div class="classbar">{"".join(method_rows)}'
+                   f'<div style="font-size:12px;color:#8b95a1;'
+                   f'margin-top:2px">Paid on the first try &rarr; after the '
+                   f'agent worked it.</div></div>')
+
+    health = bank_health()
+    sick = [(b, h) for b, h in health.items() if h["unhealthy"]]
+    bank_html = ""
+    if sick:
+        items = "".join(
+            f'<div class="feed-item"><b>{b}</b> — '
+            f'{h["failed"]} of {h["attempts"]} recovery attempts failing '
+            f'({h["failure_rate"] * 100:.0f}%, against a {h["batch_rate"] * 100:.0f}% '
+            f'norm)<div class="meta">Payments on this bank are held rather '
+            f'than attempted — the attempt is not used up.</div></div>'
+            for b, h in sick)
+        bank_html = f"""
+        <div class="panel" style="border-color:#f0dcae">
+          <div class="panel-head" style="background:#fdf3e0">
+            <h2>Bank trouble — attempts on hold</h2></div>
+          {items}
+        </div>"""
 
     promise_color = {"received": "detected", "pending": "promised",
                      "kept": "recovered", "broken": "failed",
@@ -567,7 +635,7 @@ def dashboard(cls: str = "", rec: str = "") -> str:
         <div style="overflow-x:auto">
         <table>
           <thead><tr><th>Payment</th><th>Customer</th>
-            <th class="num">Amount</th><th>What happened</th>
+            <th class="num">Amount</th><th>Paid with</th><th>What happened</th>
             <th>Why (AI diagnosis)</th><th class="num">Tries</th>
             <th>Status</th></tr></thead>
           <tbody>{''.join(body_rows)}</tbody>
@@ -580,6 +648,12 @@ def dashboard(cls: str = "", rec: str = "") -> str:
           <div class="classbar">{''.join(class_rows)}</div>
         </div>
         <div class="panel">
+          <div class="panel-head"><h2>Where you're losing money</h2>
+            <span class="refresh-note">a blended rate hides this</span></div>
+          {method_html}
+        </div>
+        {bank_html}
+        <div class="panel">
           <div class="panel-head"><h2>Customer promises</h2></div>
           <div class="feed">{''.join(promise_items) or
             '<div class="feed-item">No customer replies yet.</div>'}</div>
@@ -591,12 +665,8 @@ def dashboard(cls: str = "", rec: str = "") -> str:
         </div>
       </div>
     </div>"""
-    return PAGE_SHELL.format(
-        body=body,
-        refresh='<meta http-equiv="refresh" content="5">',
-        right_slot=esc_nav(),
-        seg_recovered=SEG_RECOVERED,
-    )
+    return shell(body, refresh='<meta http-equiv="refresh" content="5">',
+                 right_slot=esc_nav())
 
 
 @app.get("/escalations", response_class=HTMLResponse)
@@ -657,8 +727,7 @@ def escalations() -> str:
       history as <b>actor: human</b>.</div>
     {''.join(cards) or '<div class="panel" style="padding:14px 16px">'
      'Nothing needs you right now — the agent is handling the rest.</div>'}"""
-    return PAGE_SHELL.format(body=body, refresh="", right_slot="",
-                             seg_recovered=SEG_RECOVERED)
+    return shell(body, right_slot=esc_nav())
 
 
 @app.post("/webhooks/razorpay")
@@ -732,6 +801,10 @@ async def razorpay_webhook(request: Request):
 
 @app.post("/escalations/{payment_id}")
 def resolve_escalation(payment_id: str, decision: str = Form(...)):
+    if READONLY:
+        raise HTTPException(
+            403, "This is a public read-only demo. Clone the repo to run the "
+                 "agent against your own Razorpay test account.")
     if decision not in ("recovered", "written_off"):
         return RedirectResponse("/escalations", status_code=303)
     conn = get_conn()
@@ -766,9 +839,7 @@ def payment_detail(payment_id: str) -> str:
         p = conn.execute(
             "SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
         if p is None:
-            return PAGE_SHELL.format(body="<p>Payment not found.</p>",
-                                     refresh="", right_slot="",
-                                     seg_recovered=SEG_RECOVERED)
+            return shell("<p>Payment not found.</p>")
         d = conn.execute(
             "SELECT * FROM diagnoses WHERE payment_id = ?",
             (payment_id,)).fetchone()
@@ -834,5 +905,4 @@ def payment_detail(payment_id: str) -> str:
     {actions_html}
     <h3 class="sec">Audit trail — every action with its reasoning</h3>
     <ul class="timeline">{''.join(items)}</ul>"""
-    return PAGE_SHELL.format(body=body, refresh="", right_slot=esc_nav(),
-                             seg_recovered=SEG_RECOVERED)
+    return shell(body, right_slot=esc_nav())
