@@ -67,6 +67,9 @@ def simulate_blind_retry() -> dict:
         "fraud_recovered_paise": fraud_recovered,
         "attempts": attempts,
         "fraud_retries": fraud_attempts,
+        # For blind retry these are the same number: every contact it makes
+        # with an expired card IS a doomed charge retry.
+        "dead_card_contacts": dead_card_attempts,
         "dead_card_attempts": dead_card_attempts,
         "refusals_honoured": 0,   # blind retry cannot hear a customer
     }
@@ -87,6 +90,14 @@ def agent_actuals() -> dict:
             "SELECT COUNT(*) FROM recovery_actions ra "
             "JOIN payments p ON p.id = ra.payment_id "
             "WHERE p.failure_code = 'FRAUD_SUSPECTED'").fetchone()[0]
+        # Two DIFFERENT numbers, and conflating them would flatter the agent.
+        # The agent does contact expired-card customers — it asks them for a
+        # new card, which can actually work. What it never does is retry the
+        # dead card itself, which cannot. Report both.
+        dead_card_contacts = conn.execute(
+            "SELECT COUNT(*) FROM recovery_actions ra "
+            "JOIN payments p ON p.id = ra.payment_id "
+            "WHERE p.failure_code = 'EXPIRED_CARD'").fetchone()[0]
         dead_card_attempts = conn.execute(
             "SELECT COUNT(*) FROM recovery_actions ra "
             "JOIN payments p ON p.id = ra.payment_id "
@@ -106,6 +117,7 @@ def agent_actuals() -> dict:
         "fraud_recovered_paise": 0,   # structurally impossible: hard rule
         "attempts": attempts,
         "fraud_retries": fraud_retries,
+        "dead_card_contacts": dead_card_contacts,
         "dead_card_attempts": dead_card_attempts,
         "refusals_honoured": refusals,
         "at_risk_paise": at_risk,
@@ -132,7 +144,9 @@ if __name__ == "__main__":
     print(f"{'Attempts made':<38}{a['attempts']:>14}{b['attempts']:>16}")
     print(f"{'Retries against suspected fraud':<38}"
           f"{a['fraud_retries']:>14}{b['fraud_retries']:>16}")
-    print(f"{'Attempts on dead (expired) cards':<38}"
+    print(f"{'Contacts about expired cards':<38}"
+          f"{a['dead_card_contacts']:>14}{b['dead_card_contacts']:>16}")
+    print(f"{'  ...of those, doomed charge retries':<38}"
           f"{a['dead_card_attempts']:>14}{b['dead_card_attempts']:>16}")
     print(f"{'Customer refusals honoured':<38}"
           f"{a['refusals_honoured']:>14}{b['refusals_honoured']:>16}")

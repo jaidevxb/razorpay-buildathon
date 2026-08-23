@@ -43,6 +43,32 @@ KEPT_PROBABILITY = 0.6   # simulated: fraction of promises actually honoured
 # that, a human confirms. See CHALLENGES.md for how this rule was found.
 REFUSAL_AUTO_WRITEOFF_CAP_PAISE = 500 * 100   # Rs.500
 
+# A payment that has reached one of these is DONE. Money has moved or been
+# formally given up, and a human may have signed off on it. A late-arriving
+# customer reply must never drag it back into the pipeline.
+TERMINAL_STATES = {"recovered", "recovered_manual", "written_off"}
+
+# Failure classes the agent must never recover through ANY route. The policy
+# engine already refuses them; this stops the reply channel being used as a
+# side door around that rule.
+NEVER_AUTO_RECOVER = {"FRAUD_SUSPECTED"}
+
+
+def _blocked_reason(conn, pid: str) -> str | None:
+    """Why this payment must not be acted on from the reply channel."""
+    pay = conn.execute(
+        "SELECT recovery_status, failure_code FROM payments WHERE id = ?",
+        (pid,)).fetchone()
+    if pay is None:
+        return "payment no longer exists"
+    if pay["failure_code"] in NEVER_AUTO_RECOVER:
+        return (f"payment is {pay['failure_code']} — never recoverable by the "
+                f"agent through any channel, including customer replies")
+    if pay["recovery_status"] in TERMINAL_STATES:
+        return (f"payment already settled as '{pay['recovery_status']}' — "
+                f"a later reply does not reopen a closed payment")
+    return None
+
 PARSE_PROMPT = """\
 You classify replies from customers of an Indian online merchant who were
 sent a payment link for a failed payment. Replies are often Hinglish.
@@ -80,6 +106,29 @@ def parse_new_replies() -> int:
         for row in rows:
             pid = row["payment_id"]
 
+            # Before anything else: is this payment even ours to touch? A
+            # reply can arrive after the payment was settled, or against a
+            # fraud-flagged payment the policy engine already refused. Neither
+            # may be reopened here — the reply is filed and the payment is
+            # left exactly as it is.
+            blocked = _blocked_reason(conn, pid)
+            if blocked is not None:
+                with conn:
+                    conn.execute(
+                        "UPDATE promises SET status = 'closed', "
+                        "flag_reason = ?, resolved_at = ? WHERE id = ?",
+                        (blocked, utcnow(), row["id"]),
+                    )
+                    log_action(conn, pid, "promise-tracker",
+                               "reply_ignored_payment_not_actionable",
+                               {"reason": blocked,
+                                "raw_reply": row["raw_reply"],
+                                "effect": "reply filed; payment state "
+                                          "unchanged"})
+                handled += 1
+                print(f"  {pid}: ignored — {blocked}")
+                continue
+
             # Screen BEFORE the model sees the text. If it looks like an
             # injection attempt, no model call happens at all: the reply is
             # quarantined and a human decides. Spending a model call to
@@ -99,9 +148,29 @@ def parse_new_replies() -> int:
                     today=datetime.now(timezone.utc).date().isoformat()),
                 config={"response_mime_type": "application/json"},
             )
-            parsed = json.loads(resp.text)
+            # Never trust the shape of a model reply. Malformed JSON, a
+            # missing body (a safety block returns no text), or a non-integer
+            # day count must not crash the batch or leave the reply stuck in
+            # 'received' to be retried forever — an attacker able to trigger
+            # that has a denial of service on the whole promise pipeline.
+            try:
+                parsed = json.loads(resp.text or "")
+                if not isinstance(parsed, dict):
+                    raise ValueError("model returned a non-object")
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                with conn:
+                    _close(conn, row["id"], "unclear", "escalated", pid,
+                           f"could not read the model's reply ({e}) — the "
+                           f"case goes to a human rather than being guessed")
+                handled += 1
+                print(f"  {pid}: unreadable model reply -> escalated")
+                continue
+
             intent = parsed.get("intent", "unclear")
             days = parsed.get("days_until_pay")
+            # bool is a subclass of int; exclude it explicitly
+            if isinstance(days, bool) or not isinstance(days, int):
+                days = None
 
             # Second line of defence: the model itself flagged it.
             if intent == "suspicious":
@@ -227,6 +296,25 @@ def resolve_due(force: bool = False) -> int:
                 "AND due_at <= ?", (now,)).fetchall()
         for row in rows:
             pid = row["payment_id"]
+
+            # The payment can have been settled between the promise being made
+            # and it falling due. Resolving would otherwise overwrite a
+            # finished payment — or mark a fraud-flagged one 'recovered'.
+            blocked = _blocked_reason(conn, pid)
+            if blocked is not None:
+                with conn:
+                    conn.execute(
+                        "UPDATE promises SET status = 'closed', "
+                        "flag_reason = ?, resolved_at = ? WHERE id = ?",
+                        (blocked, utcnow(), row["id"]),
+                    )
+                    log_action(conn, pid, "promise-tracker",
+                               "promise_dropped_payment_not_actionable",
+                               {"reason": blocked})
+                handled += 1
+                print(f"  {pid}: promise dropped — {blocked}")
+                continue
+
             # Simulated: did the customer keep the promise? Seeded per promise
             # so re-runs agree with themselves.
             kept = random.Random(f"promise:{row['id']}").random() \

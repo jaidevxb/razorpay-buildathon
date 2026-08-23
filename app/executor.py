@@ -189,7 +189,10 @@ def _finish_action(conn, client, row, reconciling=False) -> None:
                           "continuing with simulated link delivery instead "
                           "of halting the batch",
             })
-        time.sleep(REQUEST_GAP_SECONDS)
+        else:
+            # Only pace when an API call actually happened. Sleeping after the
+            # quota fallback throttles against a call we never made.
+            time.sleep(REQUEST_GAP_SECONDS)
 
     success = _simulated_outcome(row, row)
     result = {
@@ -199,13 +202,11 @@ def _finish_action(conn, client, row, reconciling=False) -> None:
         "link_simulated_due_to_quota": link_degraded,
     }
 
-    # Cancel the link once its attempt has resolved. Two reasons:
-    #  1. Correctness: a live link for a resolved/superseded attempt is a
-    #     double-payment risk (customer pays a stale link after we already
-    #     retried or escalated).
-    #  2. Practicality: test mode caps you at 30 links total; cancelled links
-    #     free the quota.
-    if link_id is not None:
+    # Cancel the link of a FAILED attempt: a link left live after we have
+    # moved on is a double-payment risk (the customer opens the stale link
+    # after a later attempt already collected). A succeeded attempt's link is
+    # left alone — in production that link is paid, and Razorpay closes it.
+    if link_id is not None and not success:
         try:
             _with_backoff(client.payment_link.cancel, link_id)
             log_action(conn, pid, "executor", "link_cancelled",

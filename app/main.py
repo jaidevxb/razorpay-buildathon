@@ -531,8 +531,11 @@ def dashboard(cls: str = "", rec: str = "") -> str:
         ("Attempts made", str(ca["attempts"]), str(cb["attempts"])),
         ("Retries against suspected fraud",
          "0", f"<b style='color:#b42318'>{cb['fraud_retries']}</b>"),
-        ("Attempts on dead (expired) cards",
-         str(ca["dead_card_attempts"]), str(cb["dead_card_attempts"])),
+        ("Contacts about expired cards",
+         str(ca["dead_card_contacts"]), str(cb["dead_card_contacts"])),
+        ("&nbsp;&nbsp;…of those, charge retries that could never succeed",
+         str(ca["dead_card_attempts"]),
+         f"<b style='color:#b42318'>{cb['dead_card_attempts']}</b>"),
         ("Customer refusals honoured",
          str(ca["refusals_honoured"]), str(cb["refusals_honoured"])),
     ]
