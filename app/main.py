@@ -1,7 +1,11 @@
-"""Reclaim dashboard — live view of the recovery batch.
+"""Reclaim dashboard — operational view of the recovery batch.
 
 Run:  uvicorn app.main:app --reload --port 8100
 Then open http://127.0.0.1:8100
+
+Design notes: light, restrained fintech styling. Status colors are validated
+for colorblind separation (see CHALLENGES.md); identity is never carried by
+color alone — every colored element also has a text label.
 """
 
 import json
@@ -15,25 +19,26 @@ app = FastAPI(title="Reclaim")
 
 init_db()
 
-STATUS_COLORS = {
-    "captured": "#22c55e",
-    "failed": "#ef4444",
-    "abandoned": "#f59e0b",
+# status -> (background tint, text color)
+BADGE = {
+    "captured": ("#e7f4ec", "#1e7f4f"),
+    "recovered": ("#e7f4ec", "#1e7f4f"),
+    "failed": ("#fdecea", "#b42318"),
+    "abandoned": ("#fdf3e0", "#9a6700"),
+    "detected": ("#fdf3e0", "#9a6700"),
+    "in_progress": ("#e8effc", "#2456d6"),
+    "promised": ("#e8effc", "#2456d6"),
+    "escalated": ("#efeaf9", "#6d5bb8"),
+    "written_off": ("#eef0f2", "#5b6774"),
+    "planned": ("#eef0f2", "#5b6774"),
+    "executing": ("#e8effc", "#2456d6"),
+    "succeeded": ("#e7f4ec", "#1e7f4f"),
 }
-RECOVERY_COLORS = {
-    "none": "#6b7280",
-    "detected": "#f59e0b",
-    "in_progress": "#3b82f6",
-    "recovered": "#22c55e",
-    "escalated": "#a855f7",
-    "written_off": "#6b7280",
-}
-ACTION_STATE_COLORS = {
-    "planned": "#6b7280",
-    "executing": "#3b82f6",
-    "succeeded": "#22c55e",
-    "failed": "#ef4444",
-}
+
+# stacked-bar segment fills (validated: 2f9e68 / c8871d / 7a6fb5)
+SEG_RECOVERED = "#2f9e68"
+SEG_PENDING = "#c8871d"
+SEG_ESCALATED = "#7a6fb5"
 
 PAGE_SHELL = """<!doctype html>
 <html lang="en">
@@ -44,82 +49,122 @@ PAGE_SHELL = """<!doctype html>
 <title>Reclaim — Revenue Recovery</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; }}
-  body {{ background: #0b0f14; color: #e5e7eb;
-         font: 15px/1.5 system-ui, sans-serif; padding: 1.6rem 2rem 3rem; }}
-  a {{ color: #7dd3fc; text-decoration: none; }}
+  html {{ background: #f6f7f9; }}
+  body {{ color: #17202b; font: 14px/1.5 "Segoe UI", system-ui, -apple-system,
+          sans-serif; max-width: 1400px; margin: 0 auto;
+          padding: 0 28px 56px; }}
+  a {{ color: #2456d6; text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
-  h1 {{ font-size: 1.5rem; }}
-  .topbar {{ display: flex; align-items: baseline; gap: .8rem;
-             flex-wrap: wrap; }}
-  .live {{ font-size: .72rem; font-weight: 700; color: #22c55e;
-           border: 1px solid #22c55e55; border-radius: 999px;
-           padding: .1rem .6rem; letter-spacing: .08em; }}
-  .sub {{ color: #9ca3af; margin: .2rem 0 1.4rem; }}
-  .cards {{ display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-            gap: 1rem; margin-bottom: 1.4rem; }}
-  .card {{ background: #111827; border: 1px solid #1f2937;
-           border-radius: 12px; padding: 1rem 1.2rem; }}
-  .card .label {{ color: #9ca3af; font-size: .78rem;
-                  text-transform: uppercase; letter-spacing: .06em; }}
-  .card .value {{ font-size: 1.55rem; font-weight: 700; margin-top: .15rem; }}
-  .card .note {{ color: #9ca3af; font-size: .82rem; }}
-  .progress-wrap {{ background: #111827; border: 1px solid #1f2937;
-                    border-radius: 12px; padding: 1rem 1.2rem;
-                    margin-bottom: 1.6rem; }}
-  .progress {{ display: flex; height: 22px; border-radius: 8px;
-               overflow: hidden; margin-top: .6rem; background: #1f2937; }}
-  .progress div {{ height: 100%; transition: width .6s ease; }}
-  .legend {{ display: flex; gap: 1.2rem; flex-wrap: wrap; margin-top: .6rem;
-             font-size: .82rem; color: #cbd5e1; }}
-  .dot {{ display: inline-block; width: 9px; height: 9px;
-          border-radius: 50%; margin-right: .35rem; }}
-  .grid2 {{ display: grid; grid-template-columns: 2fr 1fr; gap: 1.2rem;
-            align-items: start; }}
-  @media (max-width: 1100px) {{ .grid2 {{ grid-template-columns: 1fr; }} }}
-  .panel {{ background: #111827; border: 1px solid #1f2937;
-            border-radius: 12px; overflow: hidden; }}
-  .panel h2 {{ font-size: .95rem; color: #cbd5e1; padding: .8rem 1rem;
-               background: #0f172a; border-bottom: 1px solid #1f2937; }}
+  header {{ display: flex; align-items: center; justify-content: space-between;
+            padding: 18px 0 14px; border-bottom: 1px solid #e3e6ea;
+            margin-bottom: 22px; }}
+  .brand {{ font-size: 18px; font-weight: 650; letter-spacing: -.01em; }}
+  .brand small {{ color: #5b6774; font-weight: 400; font-size: 13px;
+                  margin-left: 10px; }}
+  .env {{ font-size: 11px; font-weight: 600; color: #9a6700;
+          background: #fdf3e0; border: 1px solid #f0dcae;
+          padding: 2px 9px; border-radius: 4px; letter-spacing: .04em; }}
+  .kpis {{ display: grid;
+           grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+           gap: 12px; margin-bottom: 14px; }}
+  .kpi {{ background: #fff; border: 1px solid #e3e6ea; border-radius: 8px;
+          padding: 14px 16px; }}
+  .kpi .label {{ color: #5b6774; font-size: 11px; font-weight: 600;
+                 text-transform: uppercase; letter-spacing: .05em; }}
+  .kpi .value {{ font-size: 24px; font-weight: 650; margin-top: 2px;
+                 font-variant-numeric: tabular-nums; letter-spacing: -.01em; }}
+  .kpi .note {{ color: #5b6774; font-size: 12px; margin-top: 1px; }}
+  .resbar {{ background: #fff; border: 1px solid #e3e6ea; border-radius: 8px;
+             padding: 14px 16px; margin-bottom: 20px; }}
+  .resbar .head {{ display: flex; justify-content: space-between;
+                   font-size: 13px; margin-bottom: 9px; }}
+  .stack {{ display: flex; height: 14px; border-radius: 4px; overflow: hidden;
+            background: #eef0f2; gap: 2px; }}
+  .stack div {{ height: 100%; }}
+  .legend {{ display: flex; gap: 18px; flex-wrap: wrap; margin-top: 9px;
+             font-size: 12px; color: #3d4854;
+             font-variant-numeric: tabular-nums; }}
+  .swatch {{ display: inline-block; width: 10px; height: 10px;
+             border-radius: 2px; margin-right: 6px; vertical-align: -1px; }}
+  .cols {{ display: grid; grid-template-columns: minmax(0, 7fr) minmax(280px, 3fr);
+           gap: 16px; align-items: start; }}
+  @media (max-width: 1080px) {{ .cols {{ grid-template-columns: 1fr; }} }}
+  .panel {{ background: #fff; border: 1px solid #e3e6ea; border-radius: 8px;
+            overflow: hidden; }}
+  .panel + .panel {{ margin-top: 16px; }}
+  .panel-head {{ display: flex; align-items: center; gap: 12px;
+                 justify-content: space-between; padding: 11px 16px;
+                 border-bottom: 1px solid #e3e6ea; }}
+  .panel-head h2 {{ font-size: 13px; font-weight: 650; color: #17202b; }}
+  .panel-head form {{ display: flex; gap: 8px; }}
+  select {{ font: inherit; font-size: 12px; color: #3d4854;
+            border: 1px solid #d4d9df; border-radius: 5px;
+            padding: 3px 6px; background: #fff; }}
   table {{ width: 100%; border-collapse: collapse; }}
-  th, td {{ text-align: left; padding: .5rem .8rem;
-            border-bottom: 1px solid #1f2937; font-size: .85rem; }}
-  th {{ color: #9ca3af; font-weight: 600; font-size: .76rem;
-        text-transform: uppercase; letter-spacing: .04em; }}
+  th, td {{ text-align: left; padding: 8px 12px;
+            border-bottom: 1px solid #eef0f2; font-size: 13px;
+            white-space: nowrap; }}
+  td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  th {{ color: #5b6774; font-weight: 600; font-size: 11px;
+        text-transform: uppercase; letter-spacing: .04em;
+        background: #fafbfc; }}
   tr:last-child td {{ border-bottom: none; }}
-  tr:hover td {{ background: #16202e; }}
-  .pill {{ display: inline-block; padding: .08rem .55rem;
-           border-radius: 999px; font-size: .73rem; font-weight: 600;
-           white-space: nowrap; }}
-  .bar-row {{ padding: .55rem 1rem; font-size: .82rem; }}
-  .bar-label {{ display: flex; justify-content: space-between;
-                color: #cbd5e1; margin-bottom: .25rem; }}
-  .bar {{ height: 8px; background: #1f2937; border-radius: 6px;
-          overflow: hidden; }}
-  .bar div {{ height: 100%; border-radius: 6px; }}
-  .feed {{ max-height: 420px; overflow-y: auto; }}
-  .feed-item {{ padding: .55rem 1rem; border-bottom: 1px solid #1f2937;
-                font-size: .82rem; }}
-  .feed-item .meta {{ color: #6b7280; font-size: .72rem; }}
+  tbody tr:hover td {{ background: #f8fafc; }}
+  .badge {{ display: inline-block; padding: 1px 8px; border-radius: 4px;
+            font-size: 11.5px; font-weight: 600; }}
+  .cause {{ color: #5b6774; max-width: 260px; overflow: hidden;
+            text-overflow: ellipsis; }}
+  .classbar {{ padding: 10px 16px; }}
+  .classbar .row {{ margin-bottom: 10px; }}
+  .classbar .lbl {{ display: flex; justify-content: space-between;
+                    font-size: 12px; color: #3d4854; margin-bottom: 4px;
+                    font-variant-numeric: tabular-nums; }}
+  .classbar .track {{ height: 6px; background: #eef0f2; border-radius: 3px;
+                      overflow: hidden; }}
+  .classbar .fill {{ height: 100%; background: {seg_recovered};
+                     border-radius: 3px; }}
+  .feed {{ max-height: 430px; overflow-y: auto; }}
+  .feed-item {{ padding: 8px 16px; border-bottom: 1px solid #eef0f2;
+                font-size: 12.5px; }}
+  .feed-item:last-child {{ border-bottom: none; }}
+  .feed-item .meta {{ color: #8b95a1; font-size: 11px;
+                      font-variant-numeric: tabular-nums; }}
+  .refresh-note {{ color: #8b95a1; font-size: 11px; }}
   .timeline {{ list-style: none; }}
-  .timeline li {{ background: #111827; border: 1px solid #1f2937;
-                  border-radius: 10px; padding: .8rem 1rem;
-                  margin-bottom: .7rem; }}
-  .timeline .meta {{ color: #9ca3af; font-size: .78rem;
-                     margin-bottom: .3rem; }}
-  pre {{ background: #0f172a; padding: .6rem .8rem; border-radius: 8px;
-         overflow-x: auto; font-size: .8rem; color: #a5f3fc; }}
+  .timeline li {{ background: #fff; border: 1px solid #e3e6ea;
+                  border-radius: 8px; padding: 12px 16px;
+                  margin-bottom: 10px; }}
+  .timeline .meta {{ color: #5b6774; font-size: 12px; margin-bottom: 4px;
+                     font-variant-numeric: tabular-nums; }}
+  pre {{ background: #f6f7f9; border: 1px solid #e9ecef; padding: 8px 12px;
+         border-radius: 6px; overflow-x: auto; font-size: 12px;
+         color: #33404d; }}
+  .detail-head {{ margin: 18px 0 6px; }}
+  .detail-sub {{ color: #5b6774; margin-bottom: 18px; }}
+  h3.sec {{ font-size: 13px; font-weight: 650; margin: 20px 0 8px; }}
+  .quote {{ color: #3d4854; background: #f8fafc; border-left: 3px solid #d4d9df;
+            padding: 8px 12px; border-radius: 0 6px 6px 0; margin-top: 8px;
+            font-size: 13px; }}
 </style>
 </head>
 <body>
+<header>
+  <div class="brand">Reclaim<small>Revenue recovery agent</small></div>
+  <div style="display:flex;align-items:center;gap:12px">
+    {right_slot}
+    <span class="env">RAZORPAY TEST MODE</span>
+  </div>
+</header>
 {body}
 </body>
 </html>"""
 
 
-def pill(text: str, color: str) -> str:
-    return (f'<span class="pill" style="background:{color}22;'
-            f'color:{color}">{text}</span>')
+def badge(text: str) -> str:
+    bg, fg = BADGE.get(text, ("#eef0f2", "#5b6774"))
+    label = text.replace("_", " ")
+    return (f'<span class="badge" style="background:{bg};'
+            f'color:{fg}">{label}</span>')
 
 
 def rupees(paise: int) -> str:
@@ -127,7 +172,7 @@ def rupees(paise: int) -> str:
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard() -> str:
+def dashboard(cls: str = "", rec: str = "") -> str:
     conn = get_conn()
     try:
         total = conn.execute(
@@ -144,27 +189,42 @@ def dashboard() -> str:
             "FROM payments WHERE recovery_status = 'escalated'").fetchone()
         pending = conn.execute(
             "SELECT COUNT(*) n, COALESCE(SUM(amount_paise),0) amt "
-            "FROM payments WHERE status != 'captured' AND "
-            "recovery_status IN ('detected','in_progress','none')").fetchone()
+            "FROM payments WHERE status != 'captured' AND recovery_status "
+            "IN ('detected','in_progress','promised','none')").fetchone()
 
-        at_risk_total = (recovered["amt"] + escalated["amt"] + pending["amt"])
+        classes = [r["failure_code"] for r in conn.execute(
+            "SELECT DISTINCT failure_code FROM payments "
+            "WHERE failure_code IS NOT NULL ORDER BY failure_code")]
+        rec_states = [r["recovery_status"] for r in conn.execute(
+            "SELECT DISTINCT recovery_status FROM payments "
+            "WHERE status != 'captured' ORDER BY recovery_status")]
+
+        where = "p.status != 'captured'"
+        params: list = []
+        if cls:
+            where += " AND p.failure_code = ?"
+            params.append(cls)
+        if rec:
+            where += " AND p.recovery_status = ?"
+            params.append(rec)
+
+        rows = conn.execute(
+            f"SELECT p.*, d.root_cause, "
+            f"  (SELECT COUNT(*) FROM recovery_actions ra "
+            f"   WHERE ra.payment_id = p.id) attempts "
+            f"FROM payments p LEFT JOIN diagnoses d ON d.payment_id = p.id "
+            f"WHERE {where} "
+            f"ORDER BY CASE p.recovery_status "
+            f"  WHEN 'in_progress' THEN 0 WHEN 'promised' THEN 1 "
+            f"  WHEN 'detected' THEN 2 WHEN 'escalated' THEN 3 "
+            f"  WHEN 'recovered' THEN 4 ELSE 5 END, "
+            f"p.amount_paise DESC", params).fetchall()
 
         breakdown = conn.execute(
             "SELECT failure_code, COUNT(*) n, "
-            "  SUM(CASE WHEN recovery_status='recovered' THEN 1 ELSE 0 END) rec "
+            "  SUM(CASE WHEN recovery_status='recovered' THEN 1 ELSE 0 END) r "
             "FROM payments WHERE failure_code IS NOT NULL "
             "GROUP BY failure_code ORDER BY n DESC").fetchall()
-
-        rows = conn.execute(
-            "SELECT p.*, d.root_cause, d.recommended_action, "
-            "  (SELECT COUNT(*) FROM recovery_actions ra "
-            "   WHERE ra.payment_id = p.id) attempts "
-            "FROM payments p LEFT JOIN diagnoses d ON d.payment_id = p.id "
-            "WHERE p.status != 'captured' "
-            "ORDER BY CASE p.recovery_status "
-            "  WHEN 'in_progress' THEN 0 WHEN 'detected' THEN 1 "
-            "  WHEN 'escalated' THEN 2 WHEN 'recovered' THEN 3 ELSE 4 END, "
-            "p.amount_paise DESC").fetchall()
 
         feed = conn.execute(
             "SELECT ra.*, p.amount_paise FROM recovery_actions ra "
@@ -173,126 +233,138 @@ def dashboard() -> str:
     finally:
         conn.close()
 
-    pct = (lambda amt: 100 * amt / at_risk_total if at_risk_total else 0)
-    recovery_rate = (100 * recovered["amt"] / at_risk_total
-                     if at_risk_total else 0)
+    at_risk = recovered["amt"] + escalated["amt"] + pending["amt"]
+    pct = (lambda amt: 100 * amt / at_risk if at_risk else 0)
+    rate = 100 * recovered["amt"] / at_risk if at_risk else 0
 
-    cards = f"""
-    <div class="cards">
-      <div class="card"><div class="label">Batch total</div>
+    kpis = f"""
+    <div class="kpis">
+      <div class="kpi"><div class="label">Batch volume</div>
         <div class="value">{rupees(total['amt'])}</div>
         <div class="note">{total['n']} payments</div></div>
-      <div class="card"><div class="label">Captured cleanly</div>
-        <div class="value" style="color:#22c55e">{rupees(captured['amt'])}</div>
+      <div class="kpi"><div class="label">Captured cleanly</div>
+        <div class="value">{rupees(captured['amt'])}</div>
         <div class="note">{captured['n']} payments</div></div>
-      <div class="card"><div class="label">Recovered by agent</div>
-        <div class="value" style="color:#38bdf8">{rupees(recovered['amt'])}</div>
-        <div class="note">{recovered['n']} payments ·
-          {recovery_rate:.0f}% of at-risk value</div></div>
-      <div class="card"><div class="label">Still pending</div>
-        <div class="value" style="color:#f59e0b">{rupees(pending['amt'])}</div>
-        <div class="note">{pending['n']} payments in pipeline</div></div>
-      <div class="card"><div class="label">Escalated to human</div>
-        <div class="value" style="color:#a855f7">{rupees(escalated['amt'])}</div>
+      <div class="kpi"><div class="label">Recovered by agent</div>
+        <div class="value">{rupees(recovered['amt'])}</div>
+        <div class="note">{recovered['n']} payments · {rate:.0f}% of at-risk
+        value</div></div>
+      <div class="kpi"><div class="label">In pipeline</div>
+        <div class="value">{rupees(pending['amt'])}</div>
+        <div class="note">{pending['n']} payments</div></div>
+      <div class="kpi"><div class="label">Escalated to human</div>
+        <div class="value">{rupees(escalated['amt'])}</div>
         <div class="note">{escalated['n']} payments</div></div>
     </div>"""
 
-    progress = f"""
-    <div class="progress-wrap">
-      <div class="bar-label"><b>At-risk revenue: {rupees(at_risk_total)}</b>
-        <span style="color:#9ca3af">how the agent is resolving it</span></div>
-      <div class="progress">
-        <div style="width:{pct(recovered['amt']):.1f}%;background:#22c55e"></div>
-        <div style="width:{pct(pending['amt']):.1f}%;background:#f59e0b"></div>
-        <div style="width:{pct(escalated['amt']):.1f}%;background:#a855f7"></div>
+    resbar = f"""
+    <div class="resbar">
+      <div class="head"><b>Resolution of at-risk revenue
+        ({rupees(at_risk)})</b>
+        <span class="refresh-note">page refreshes every 5s</span></div>
+      <div class="stack">
+        <div style="width:{pct(recovered['amt']):.1f}%;
+          background:{SEG_RECOVERED}" title="recovered"></div>
+        <div style="width:{pct(pending['amt']):.1f}%;
+          background:{SEG_PENDING}" title="pending"></div>
+        <div style="width:{pct(escalated['amt']):.1f}%;
+          background:{SEG_ESCALATED}" title="escalated"></div>
       </div>
       <div class="legend">
-        <span><span class="dot" style="background:#22c55e"></span>
-          recovered {rupees(recovered['amt'])}</span>
-        <span><span class="dot" style="background:#f59e0b"></span>
-          pending {rupees(pending['amt'])}</span>
-        <span><span class="dot" style="background:#a855f7"></span>
-          escalated {rupees(escalated['amt'])}</span>
+        <span><span class="swatch" style="background:{SEG_RECOVERED}"></span>
+          Recovered {rupees(recovered['amt'])}</span>
+        <span><span class="swatch" style="background:{SEG_PENDING}"></span>
+          Pending {rupees(pending['amt'])}</span>
+        <span><span class="swatch" style="background:{SEG_ESCALATED}"></span>
+          Escalated {rupees(escalated['amt'])}</span>
       </div>
     </div>"""
 
-    bar_rows = []
+    opt = lambda v, sel: (f'<option value="{v}"'
+                          f'{" selected" if v == sel else ""}>{v or "all"}'
+                          f'</option>')
+    filters = f"""
+    <form method="get">
+      <select name="cls" onchange="this.form.submit()">
+        {opt('', cls)}{''.join(opt(c, cls) for c in classes)}
+      </select>
+      <select name="rec" onchange="this.form.submit()">
+        {opt('', rec)}{''.join(opt(s, rec) for s in rec_states)}
+      </select>
+    </form>"""
+
+    body_rows = []
+    for r in rows:
+        body_rows.append(f"""
+        <tr>
+          <td><a href="/payment/{r['id']}">{r['id']}</a></td>
+          <td>{r['customer_name']}</td>
+          <td class="num">{rupees(r['amount_paise'])}</td>
+          <td>{r['failure_code'] or ''}</td>
+          <td class="cause">{r['root_cause'] or '—'}</td>
+          <td class="num">{r['attempts'] or ''}</td>
+          <td>{badge(r['recovery_status'])}</td>
+        </tr>""")
+
+    class_rows = []
     for b in breakdown:
-        frac = 100 * b["rec"] / b["n"] if b["n"] else 0
-        bar_rows.append(f"""
-        <div class="bar-row">
-          <div class="bar-label"><span>{b['failure_code']}</span>
-            <span>{b['rec']}/{b['n']} recovered</span></div>
-          <div class="bar"><div style="width:{frac:.0f}%;
-            background:#38bdf8"></div></div>
+        frac = 100 * b["r"] / b["n"] if b["n"] else 0
+        class_rows.append(f"""
+        <div class="row">
+          <div class="lbl"><span>{b['failure_code']}</span>
+            <span>{b['r']}/{b['n']}</span></div>
+          <div class="track"><div class="fill"
+            style="width:{frac:.0f}%"></div></div>
         </div>""")
 
     feed_items = []
     for f in feed:
-        color = ACTION_STATE_COLORS.get(f["state"], "#6b7280")
         link = (f' · <a href="{f["rzp_link_url"]}" target="_blank">link</a>'
                 if f["rzp_link_url"] else "")
         feed_items.append(f"""
         <div class="feed-item">
           <a href="/payment/{f['payment_id']}">{f['payment_id']}</a>
-          · {f['action']} · attempt {f['attempt']}
-          {pill(f['state'], color)}{link}
-          <div class="meta">{f['created_at'][:19]} ·
+          · {f['action'].replace('_', ' ')} · attempt {f['attempt']}
+          {badge(f['state'])}{link}
+          <div class="meta">{f['created_at'][:19].replace('T', ' ')} ·
             {rupees(f['amount_paise'])}</div>
         </div>""")
 
-    body_rows = []
-    for r in rows:
-        action = r["recommended_action"] or "—"
-        body_rows.append(f"""
-        <tr>
-          <td><a href="/payment/{r['id']}">{r['id']}</a></td>
-          <td>{r['customer_name']}</td>
-          <td>{rupees(r['amount_paise'])}</td>
-          <td>{r['failure_code'] or ''}</td>
-          <td>{r['root_cause'] or
-               '<i style="color:#6b7280">not diagnosed</i>'}</td>
-          <td>{action}</td>
-          <td style="text-align:center">{r['attempts'] or ''}</td>
-          <td>{pill(r['recovery_status'],
-                    RECOVERY_COLORS.get(r['recovery_status'], '#6b7280'))}</td>
-        </tr>""")
-
     body = f"""
-    <div class="topbar">
-      <h1>Reclaim <span style="color:#38bdf8">·</span> Revenue Recovery</h1>
-      <span class="live">● LIVE</span>
-    </div>
-    <div class="sub">AI agent recovering failed payments on Razorpay test mode
-      — every action bounded, logged and explainable</div>
-    {cards}
-    {progress}
-    <div class="grid2">
+    {kpis}
+    {resbar}
+    <div class="cols">
       <div class="panel">
-        <h2>At-risk payments ({len(rows)})</h2>
+        <div class="panel-head"><h2>At-risk payments ({len(rows)})</h2>
+          {filters}</div>
         <div style="overflow-x:auto">
         <table>
-          <tr><th>Payment</th><th>Customer</th><th>Amount</th><th>Failure</th>
-              <th>Diagnosis (Gemini)</th><th>Action</th><th>Att.</th>
-              <th>Recovery</th></tr>
-          {''.join(body_rows)}
+          <thead><tr><th>Payment</th><th>Customer</th>
+            <th class="num">Amount</th><th>Failure</th>
+            <th>Root cause (Gemini)</th><th class="num">Attempts</th>
+            <th>State</th></tr></thead>
+          <tbody>{''.join(body_rows)}</tbody>
         </table>
         </div>
       </div>
       <div>
-        <div class="panel" style="margin-bottom:1.2rem">
-          <h2>Recovery rate by failure class</h2>
-          {''.join(bar_rows)}
+        <div class="panel">
+          <div class="panel-head"><h2>Recovery rate by failure class</h2></div>
+          <div class="classbar">{''.join(class_rows)}</div>
         </div>
         <div class="panel">
-          <h2>Action feed (latest 30)</h2>
+          <div class="panel-head"><h2>Recent actions</h2></div>
           <div class="feed">{''.join(feed_items) or
-            '<div class="feed-item">no actions yet</div>'}</div>
+            '<div class="feed-item">No actions yet.</div>'}</div>
         </div>
       </div>
     </div>"""
-    refresh = '<meta http-equiv="refresh" content="4">'
-    return PAGE_SHELL.format(body=body, refresh=refresh)
+    return PAGE_SHELL.format(
+        body=body,
+        refresh='<meta http-equiv="refresh" content="5">',
+        right_slot="",
+        seg_recovered=SEG_RECOVERED,
+    )
 
 
 @app.get("/payment/{payment_id}", response_class=HTMLResponse)
@@ -302,8 +374,9 @@ def payment_detail(payment_id: str) -> str:
         p = conn.execute(
             "SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
         if p is None:
-            return PAGE_SHELL.format(body="<h1>Payment not found</h1>",
-                                     refresh="")
+            return PAGE_SHELL.format(body="<p>Payment not found.</p>",
+                                     refresh="", right_slot="",
+                                     seg_recovered=SEG_RECOVERED)
         d = conn.execute(
             "SELECT * FROM diagnoses WHERE payment_id = ?",
             (payment_id,)).fetchone()
@@ -319,35 +392,32 @@ def payment_detail(payment_id: str) -> str:
     diag_html = ""
     if d is not None:
         diag_html = f"""
-        <h2 style="font-size:1rem;color:#cbd5e1;margin:1.4rem 0 .6rem">
-          Gemini diagnosis</h2>
-        <div class="card">
-          <b>{d['root_cause']}</b> —
-          {'transient, retry could succeed' if d['transient']
-           else 'not transient'}
-          · recommended: <b>{d['recommended_action']}</b>
-          <p style="margin-top:.6rem;color:#cbd5e1">
-            Draft message: “{d['customer_message']}”</p>
+        <h3 class="sec">Diagnosis (Gemini)</h3>
+        <div class="panel" style="padding:12px 16px">
+          <b>{d['root_cause']}</b> ·
+          {'transient — a retry could succeed' if d['transient']
+           else 'not transient'} ·
+          recommended action: <b>{d['recommended_action'].replace('_', ' ')}</b>
+          <div class="quote">{d['customer_message']}</div>
         </div>"""
 
     action_rows = []
     for a in actions:
-        color = ACTION_STATE_COLORS.get(a["state"], "#6b7280")
         link = (f'<a href="{a["rzp_link_url"]}" target="_blank">'
                 f'{a["rzp_link_id"]}</a>' if a["rzp_link_url"] else "—")
         action_rows.append(f"""
-        <tr><td>{a['attempt']}</td><td>{a['action']}</td>
-            <td>{pill(a['state'], color)}</td><td>{link}</td>
-            <td>{(a['executed_at'] or '')[:19]}</td></tr>""")
+        <tr><td class="num">{a['attempt']}</td>
+            <td>{a['action'].replace('_', ' ')}</td>
+            <td>{badge(a['state'])}</td><td>{link}</td>
+            <td>{(a['executed_at'] or '')[:19].replace('T', ' ')}</td></tr>""")
     actions_html = ""
     if action_rows:
         actions_html = f"""
-        <h2 style="font-size:1rem;color:#cbd5e1;margin:1.4rem 0 .6rem">
-          Recovery attempts</h2>
+        <h3 class="sec">Recovery attempts</h3>
         <div class="panel"><table>
-          <tr><th>#</th><th>Action</th><th>State</th>
-              <th>Razorpay link</th><th>Executed</th></tr>
-          {''.join(action_rows)}
+          <thead><tr><th class="num">#</th><th>Action</th><th>State</th>
+              <th>Razorpay link</th><th>Executed</th></tr></thead>
+          <tbody>{''.join(action_rows)}</tbody>
         </table></div>"""
 
     items = []
@@ -355,23 +425,22 @@ def payment_detail(payment_id: str) -> str:
         detail = json.dumps(json.loads(e["detail"]), indent=2)
         items.append(f"""
         <li>
-          <div class="meta">{e['created_at'][:19]} · actor:
-            <b>{e['actor']}</b></div>
-          <b>{e['action']}</b>
+          <div class="meta">{e['created_at'][:19].replace('T', ' ')} ·
+            {e['actor']}</div>
+          <b>{e['action'].replace('_', ' ')}</b>
           <pre>{detail}</pre>
         </li>""")
 
     body = f"""
-    <a href="/">&larr; back to batch</a>
-    <h1 style="margin-top:.6rem">{p['id']}</h1>
-    <div class="sub">{p['customer_name']} · {rupees(p['amount_paise'])} ·
+    <a href="/">&larr; All payments</a>
+    <h1 class="detail-head" style="font-size:20px">{p['id']}</h1>
+    <div class="detail-sub">{p['customer_name']} ·
+      {rupees(p['amount_paise'])} ·
       order {p['rzp_order_id'] or '(offline)'} ·
-      {pill(p['status'], STATUS_COLORS.get(p['status'], '#6b7280'))}
-      {pill(p['recovery_status'],
-            RECOVERY_COLORS.get(p['recovery_status'], '#6b7280'))}</div>
+      {badge(p['status'])} {badge(p['recovery_status'])}</div>
     {diag_html}
     {actions_html}
-    <h2 style="font-size:1rem;color:#cbd5e1;margin:1.4rem 0 .6rem">
-      Audit trail — every action, with reasoning</h2>
+    <h3 class="sec">Audit trail — every action with its reasoning</h3>
     <ul class="timeline">{''.join(items)}</ul>"""
-    return PAGE_SHELL.format(body=body, refresh="")
+    return PAGE_SHELL.format(body=body, refresh="", right_slot="",
+                             seg_recovered=SEG_RECOVERED)
