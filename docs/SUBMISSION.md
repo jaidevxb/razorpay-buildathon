@@ -71,6 +71,30 @@ in the repo; condensed):
 > so it stays automatic, while a refusal forfeits money, so above ₹500 a human
 > confirms before it is given up.
 
+## Two things to say out loud in the panel
+
+**1. Independent convergence with Razorpay's own production design.**
+Razorpay already ships AI-driven bank-outage detection, and their
+Subscriptions product already retries "timed to coincide with periods when
+customer accounts are most likely to have funds." That is exactly the
+salary-window retry policy in this project, arrived at independently before
+reading their docs. Converging on a real payments company's shipped design
+without having seen it is a stronger signal than any feature list — it says
+the reasoning was sound, not that the idea was borrowed. The same research
+also argued *against* work: building a competing outage detector would have
+been wasted effort, so the agent consumes that kind of signal instead of
+reproducing it. Knowing where not to build is part of the judgment.
+
+**2. A blended success rate hides the problem.**
+The recurring industry complaint: 94% on UPI and 78% on cards averages to a
+healthy-looking 90%, so nobody goes hunting for the card problem. Reclaim
+splits the number apart, and on this batch it surfaces exactly that shape —
+cards paid on the first try only 43% of the time against UPI's 60%, and cards
+are where the agent recovers most (43% → 86%). That view is also why the
+agent treats attempts as a budget: roughly 40% of Indian payment failures are
+downstream bank problems, so spending one of three allowed attempts while a
+bank is broken wastes it.
+
 ## 5-minute video script
 
 **0:00–0:45 — Problem.** Screen: dashboard KPI row. "Out of 100 payments this
