@@ -4,6 +4,7 @@ import pytest
 
 import app.db as db
 import app.executor as executor
+from app.channels import assign
 from app.db import get_conn, init_db, utcnow
 
 
@@ -50,19 +51,25 @@ def fake_client():
     return FakeClient()
 
 
-def seed_payment(pid="pay_t_0001", code="INSUFFICIENT_FUNDS",
+def seed_payment(pid="pay_t_0001", code="INSUFFICIENT_FUNDS",  # noqa: C901
                  status="failed", amount=50_000,
                  recovery_status="detected",
                  recommended_action="payment_link"):
-    """Insert one payment (+ diagnosis) ready for the policy engine."""
+    """Insert one payment (+ diagnosis) ready for the policy engine.
+
+    Mirrors the simulator's insert, channel assignment included, so tests
+    exercise rows shaped exactly like real ones.
+    """
+    method, bank = assign(pid, code)
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO payments (id, customer_name, customer_email, "
             "customer_phone, amount_paise, status, failure_code, "
-            "failure_message, recovery_status, created_at) "
+            "failure_message, method, bank, recovery_status, created_at) "
             "VALUES (?, 'Test Person', 't@example.com', '+919999999999', "
-            "?, ?, ?, 'test failure', ?, ?)",
-            (pid, amount, status, code, recovery_status, utcnow()),
+            "?, ?, ?, 'test failure', ?, ?, ?, ?)",
+            (pid, amount, status, code, method, bank, recovery_status,
+             utcnow()),
         )
         conn.execute(
             "INSERT INTO diagnoses (payment_id, root_cause, transient, "
