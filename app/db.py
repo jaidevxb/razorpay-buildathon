@@ -59,6 +59,19 @@ CREATE TABLE IF NOT EXISTS recovery_actions (
     FOREIGN KEY (payment_id) REFERENCES payments(id)
 );
 
+CREATE TABLE IF NOT EXISTS promises (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    payment_id  TEXT NOT NULL,
+    raw_reply   TEXT NOT NULL,   -- what the customer wrote (Hinglish etc.)
+    intent      TEXT,            -- promise_to_pay | refusal | claims_paid | unclear
+    due_at      TEXT,            -- when they promised to pay
+    status      TEXT NOT NULL DEFAULT 'received',
+        -- received | pending | kept | broken | closed
+    created_at  TEXT NOT NULL,
+    resolved_at TEXT,
+    FOREIGN KEY (payment_id) REFERENCES payments(id)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     payment_id  TEXT NOT NULL,
