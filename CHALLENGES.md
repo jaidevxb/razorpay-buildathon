@@ -77,3 +77,22 @@ just slow and silent.
 process-lifetime flag and every later link action skips the API call
 entirely. Asking the same question repeatedly and waiting a minute for the
 same "no" is not resilience, it's a retry storm against yourself.
+
+## 2026-08-23 — Human work was inflating the agent's own scorecard
+
+**What broke:** Found by using the new escalation queue. When a person marked
+an escalated payment as "collected manually", it was stored with
+`recovery_status = 'recovered'` — the same status the agent uses. So the
+agent's recovery rate climbed from 85% to 89% on the back of work a human
+did, and a FRAUD_SUSPECTED payment showed as "recovered" by an agent that had
+explicitly refused to touch it.
+
+**Fix:** Human collections get their own status (`recovered_manual`), surfaced
+as "collected by you". The agent's number stays honestly at 85% no matter how
+much the merchant collects themselves, and the baseline comparison counts only
+agent recoveries.
+
+**Why it mattered more than it looked:** this was a metrics-integrity bug, not
+a money bug — nothing was double-charged. But a system that quietly flatters
+itself can't be trusted about anything else it reports, and the whole project's
+claim rests on its numbers being honest.
