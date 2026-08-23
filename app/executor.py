@@ -67,6 +67,10 @@ def _client():
                                  config.RAZORPAY_KEY_SECRET))
 
 
+# process-lifetime memo; list so the nested function can mutate it
+_LINK_QUOTA_EXHAUSTED = [False]
+
+
 def _create_payment_link(client, payment, action_row, check_existing=False):
     """Create a real Razorpay payment link, idempotently via reference_id.
 
@@ -75,6 +79,11 @@ def _create_payment_link(client, payment, action_row, check_existing=False):
     halves our API calls against the tightly rate-limited link endpoint.
     """
     key = action_row["idempotency_key"]
+    # Once the account's lifetime link quota is known to be exhausted, stop
+    # asking: every further attempt would burn a full rate-limit backoff cycle
+    # (60s+) just to hear "no" again.
+    if _LINK_QUOTA_EXHAUSTED[0]:
+        return None, None, False
     if check_existing:
         existing = _with_backoff(client.payment_link.all,
                                  {"reference_id": key})
@@ -101,12 +110,34 @@ def _create_payment_link(client, payment, action_row, check_existing=False):
     except razorpay.errors.ServerError as e:
         if "limit of 30" not in str(e):
             raise
+        _LINK_QUOTA_EXHAUSTED[0] = True
         # Test mode caps payment links at 30 EVER — cancelling does not free
         # the quota, and only live-mode KYC lifts it. Degrade gracefully:
         # continue the recovery with a simulated link rather than halting the
         # whole batch, and mark the degradation clearly in the result.
         return None, None, False
     return link["id"], link["short_url"], False
+
+
+# Some customers who don't pay the link still reply to it. Replies are
+# Hinglish free text; the promise-tracker (app/promises.py) parses them with
+# Gemini and applies deterministic policy.
+CUSTOMER_REPLY_PROBABILITY = 0.35
+CANNED_REPLIES = [
+    "haan bhai salary aane do, Friday ko pakka kar dunga",
+    "will pay in 2 days, thoda busy hu abhi",
+    "kal subah tak kar dunga payment, sorry for delay",
+    "not interested anymore, please cancel my order",
+    "maine already pay kar diya tha kal hi, check karo na",
+    "abhi paise nahi hai, next month me karunga",
+]
+
+
+def _maybe_customer_reply(action_row) -> str | None:
+    rng = random.Random(action_row["idempotency_key"] + ":reply")
+    if rng.random() < CUSTOMER_REPLY_PROBABILITY:
+        return rng.choice(CANNED_REPLIES)
+    return None
 
 
 def _simulated_outcome(action_row, payment) -> bool:
@@ -210,7 +241,27 @@ def _finish_action(conn, client, row, reconciling=False) -> None:
                 "attempt": row["attempt"],
                 "rzp_link_url": link_url,
             })
-            if row["attempt"] >= MAX_ATTEMPTS:
+            # Link-type outreach can draw a reply instead of a payment. A
+            # reply routes to the promise-tracker and PAUSES further attempts
+            # — retrying at someone who just told you "Friday" is hostile.
+            reply = None
+            if row["action"] in ("payment_link", "update_card"):
+                reply = _maybe_customer_reply(row)
+            if reply is not None:
+                conn.execute(
+                    "INSERT INTO promises (payment_id, raw_reply, created_at) "
+                    "VALUES (?, ?, ?)", (pid, reply, utcnow()),
+                )
+                conn.execute(
+                    "UPDATE payments SET recovery_status = 'promised', "
+                    "retry_count = ? WHERE id = ?", (row["attempt"], pid),
+                )
+                log_action(conn, pid, "executor", "customer_replied", {
+                    "raw_reply": reply,
+                    "simulated": True,
+                    "note": "attempts paused; promise-tracker takes over",
+                })
+            elif row["attempt"] >= MAX_ATTEMPTS:
                 conn.execute(
                     "UPDATE payments SET recovery_status = 'escalated', "
                     "retry_count = ? WHERE id = ?", (row["attempt"], pid),
