@@ -64,10 +64,12 @@ CREATE TABLE IF NOT EXISTS promises (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     payment_id  TEXT NOT NULL,
     raw_reply   TEXT NOT NULL,   -- what the customer wrote (Hinglish etc.)
-    intent      TEXT,            -- promise_to_pay | refusal | claims_paid | unclear
+    intent      TEXT,            -- promise_to_pay | refusal | claims_paid
+                                 -- | unclear | suspicious
     due_at      TEXT,            -- when they promised to pay
     status      TEXT NOT NULL DEFAULT 'received',
-        -- received | pending | kept | broken | closed
+        -- received | pending | kept | broken | closed | quarantined
+    flag_reason TEXT,            -- why a reply was quarantined, if it was
     created_at  TEXT NOT NULL,
     resolved_at TEXT,
     FOREIGN KEY (payment_id) REFERENCES payments(id)
@@ -105,6 +107,9 @@ def init_db() -> None:
         if "scheduled_at" not in cols:
             conn.execute(
                 "ALTER TABLE recovery_actions ADD COLUMN scheduled_at TEXT")
+        pcols = {r[1] for r in conn.execute("PRAGMA table_info(promises)")}
+        if pcols and "flag_reason" not in pcols:
+            conn.execute("ALTER TABLE promises ADD COLUMN flag_reason TEXT")
 
 
 def log_action(conn: sqlite3.Connection, payment_id: str, actor: str,
