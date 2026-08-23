@@ -56,3 +56,24 @@ be the correct design regardless of quota: when attempt 1's link stays live
 and attempt 2 issues a new link for the same debt, a customer who later opens
 the stale link can pay twice. The quota error forced us into behaviour a real
 money system needs anyway.
+
+**Follow-up:** Cancelling did NOT free the quota — the 30-link cap counts
+links ever created, and only live-mode KYC lifts it. So the executor degrades
+gracefully instead: when the quota error appears, it continues the recovery
+with simulated link delivery and discloses that per-action in the audit trail
+(`link_quota_fallback`). The batch completes rather than halting.
+
+## 2026-08-23 — Graceful degradation that took 40 minutes per run
+
+**What broke:** Nothing crashed — worse, the executor *worked* but crawled.
+With the link quota exhausted, every link action first burned a full
+rate-limit backoff cycle (1+2+4+8+16+32s of waiting) before Razorpay finally
+said "quota" and the fallback kicked in. ~30 link actions × ~60s of futile
+politeness ≈ a 40-minute batch that should take 2 minutes. A background run
+looked hung because Python buffers stdout when piped — the process was fine,
+just slow and silent.
+
+**Fix:** Remember the quota answer. The first quota error sets a
+process-lifetime flag and every later link action skips the API call
+entirely. Asking the same question repeatedly and waiting a minute for the
+same "no" is not resilience, it's a retry storm against yourself.
