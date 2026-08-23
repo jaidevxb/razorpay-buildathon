@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS payments (
     customer_phone  TEXT NOT NULL,
     amount_paise    INTEGER NOT NULL,
     currency        TEXT NOT NULL DEFAULT 'INR',
+    method          TEXT,                      -- upi | card | netbanking | wallet
+    bank            TEXT,                      -- issuing bank / PSP handle
     status          TEXT NOT NULL,             -- captured | failed | abandoned
     failure_code    TEXT,                      -- e.g. INSUFFICIENT_FUNDS (NULL if captured)
     failure_message TEXT,                      -- gateway-style human message
@@ -110,6 +112,24 @@ def init_db() -> None:
         pcols = {r[1] for r in conn.execute("PRAGMA table_info(promises)")}
         if pcols and "flag_reason" not in pcols:
             conn.execute("ALTER TABLE promises ADD COLUMN flag_reason TEXT")
+
+        paycols = {r[1] for r in conn.execute("PRAGMA table_info(payments)")}
+        if paycols and "method" not in paycols:
+            conn.execute("ALTER TABLE payments ADD COLUMN method TEXT")
+            conn.execute("ALTER TABLE payments ADD COLUMN bank TEXT")
+        # Backfill any row missing a channel. Assignment is a pure function of
+        # the payment id, so a backfilled row gets exactly what a fresh seed
+        # would have given it — old and new batches stay consistent.
+        missing = conn.execute(
+            "SELECT id, failure_code FROM payments WHERE method IS NULL"
+        ).fetchall()
+        if missing:
+            from app.channels import assign
+            for row in missing:
+                method, bank = assign(row[0], row[1])
+                conn.execute(
+                    "UPDATE payments SET method = ?, bank = ? WHERE id = ?",
+                    (method, bank, row[0]))
 
 
 def log_action(conn: sqlite3.Connection, payment_id: str, actor: str,

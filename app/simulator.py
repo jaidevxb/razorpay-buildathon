@@ -21,6 +21,7 @@ import time
 import razorpay
 
 from app import config
+from app.channels import assign
 from app.db import get_conn, init_db, log_action, utcnow
 
 FIRST_NAMES = ["Aarav", "Vivaan", "Diya", "Ananya", "Rohan", "Priya", "Kabir",
@@ -135,16 +136,19 @@ def seed(count: int, seed_value: int | None, offline: bool) -> None:
             # crash. A batch-wide transaction would roll back rows whose
             # external side effect already happened.
             with conn:
+                method, bank = assign(payment_id, code)
                 conn.execute(
                     "INSERT INTO payments (id, rzp_order_id, customer_name, "
                     "customer_email, customer_phone, amount_paise, status, "
-                    "failure_code, failure_message, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "failure_code, failure_message, method, bank, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (payment_id, rzp_order_id, name, email, phone, amount,
-                     status, code, msg, utcnow()),
+                     status, code, msg, method, bank, utcnow()),
                 )
                 log_action(conn, payment_id, "simulator", "payment_seeded", {
                     "rzp_order_id": rzp_order_id,
+                    "method": method,
+                    "bank": bank,
                     "status": status,
                     "failure_code": code,
                     "amount_paise": amount,

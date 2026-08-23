@@ -23,11 +23,13 @@ import argparse
 import json
 import random
 import time
+from datetime import datetime, timedelta, timezone
 
 import razorpay
 
 from app import config
 from app.db import get_conn, init_db, log_action, utcnow
+from app.health import HOLD_HOURS, bank_health, is_unhealthy
 from app.policy import MAX_ATTEMPTS, schedule_for
 
 REQUEST_GAP_SECONDS = 2.0   # payment-link API is rate-limited harder than orders
@@ -312,11 +314,40 @@ def run_pass(client=None, pace_seconds: float = 0.0,
         params = [] if force_due else [utcnow()]
         rows = conn.execute(
             "SELECT ra.*, p.amount_paise, p.customer_name, p.customer_email, "
-            "       p.customer_phone, p.failure_code "
+            "       p.customer_phone, p.failure_code, p.bank "
             "FROM recovery_actions ra JOIN payments p ON p.id = ra.payment_id "
             f"WHERE ra.state = 'planned'{due_clause} ORDER BY ra.id",
             params).fetchall()
+
+        # Attempts are a budget (MAX_ATTEMPTS per payment, ever). Spending one
+        # while the customer's bank is failing wastes it on a request that was
+        # never going to work. Held actions stay 'planned' and keep their
+        # attempt number — nothing is consumed.
+        health = bank_health(conn)
         for row in rows:
+            if not force_due and is_unhealthy(row["bank"], health):
+                h = health[row["bank"]]
+                later = (datetime.now(timezone.utc)
+                         + timedelta(hours=HOLD_HOURS)).isoformat()
+                with conn:
+                    conn.execute(
+                        "UPDATE recovery_actions SET scheduled_at = ? "
+                        "WHERE id = ?", (later, row["id"]),
+                    )
+                    log_action(conn, row["payment_id"], "executor",
+                               "held_bank_unhealthy", {
+                                   "bank": row["bank"],
+                                   "failure_rate": round(h["failure_rate"], 2),
+                                   "sample": h["attempts"],
+                                   "retry_after": later,
+                                   "reason": "the bank is failing well above "
+                                             "the batch norm; attempts are a "
+                                             "budget and this one would be "
+                                             "wasted. Not consumed.",
+                               })
+                print(f"  {row['payment_id']} HELD — {row['bank']} unhealthy "
+                      f"({h['failure_rate'] * 100:.0f}% failing)")
+                continue
             # Mark in-flight BEFORE the external call and commit, so a crash
             # here leaves evidence for reconciliation.
             with conn:
